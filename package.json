@@ -1,0 +1,13 @@
+{
+  "name": "telegram-bot",
+  "version": "1.0.0",
+  "description": "Multi-Tool Telegram Bot",
+  "scripts": {
+    "start": "python bot.py",
+    "build": "pip install -r requirements.txt"
+  },
+  "engines": {
+    "node": "16.x",
+    "python": "3.11"
+  }
+}
