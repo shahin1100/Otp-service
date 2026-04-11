@@ -1,5 +1,6 @@
 *.pyc
 __pycache__/
 bot_data.db
-.env
 *.log
+.env
+.DS_Store
