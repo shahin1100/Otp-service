@@ -22,11 +22,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
+BOT_TOKEN = "8343363851:AAET2wh52oAgXrGEd_IDCEdfZNUUzQ7rNKM"  # আপনার টোকেন যোগ করা হয়েছে
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "8343363851").split(","))) if os.getenv("ADMIN_IDS") else [8343363851]
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN not found in .env file")
+    raise ValueError("BOT_TOKEN not found")
 
 # Database setup
 def init_db():
@@ -71,11 +71,6 @@ class FacebookChecker:
     def check_account(phone_number):
         """
         DEMO VERSION - Simulates Facebook account checking
-        For real implementation, you would need:
-        1. Facebook's official API (requires approval)
-        2. Or reverse-engineered endpoints (against ToS)
-        
-        This is a SIMULATION for educational purposes only
         """
         try:
             # Clean phone number
@@ -88,7 +83,6 @@ class FacebookChecker:
                 }
             
             # SIMULATION: Use number patterns to determine "existence"
-            # In real implementation, this would be an actual API call to Facebook
             last_digit = int(phone[-1])
             sum_digits = sum(int(d) for d in phone) % 10
             
@@ -128,12 +122,6 @@ class FacebookChecker:
     def send_recovery_otp(phone_number):
         """
         DEMO VERSION - Simulates sending OTP via SMS
-        Real implementation would require:
-        1. Facebook's password reset endpoint
-        2. SMS gateway integration
-        3. Handling rate limits and captchas
-        
-        This is a SIMULATION for educational purposes only
         """
         try:
             # Clean phone
@@ -147,7 +135,7 @@ class FacebookChecker:
                 'success': True,
                 'otp': mock_otp,
                 'message': f'📱 OTP sent to {phone_number[:4]}****{phone_number[-2:]}',
-                'expires_in': 300,  # 5 minutes
+                'expires_in': 300,
                 'note': '⚠️ This is a SIMULATION. No actual SMS was sent.'
             }
             
@@ -193,7 +181,6 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
     
-    # Get stats
     c.execute("SELECT COUNT(*) FROM users")
     total_users = c.fetchone()[0]
     
@@ -227,7 +214,6 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ **Accounts Found:** `{accounts_found}`\n"
         f"💰 **Total Credits:** `{total_credits}`\n\n"
         f"🤖 **Bot Status:** 🟢 Running\n"
-        f"⚠️ **Note:** Facebook checker is DEMO mode"
     )
     
     await query.message.edit_text(stats_text, parse_mode="Markdown")
@@ -284,7 +270,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🆘 Support", callback_data="support")]
     ])
     
-    # Add admin button if user is admin
     if is_admin(update.effective_user.id):
         keyboard.inline_keyboard.append([InlineKeyboardButton("🔧 Admin Panel", callback_data="admin_panel")])
     
@@ -338,7 +323,7 @@ async def facebook_checker_menu(update: Update, context: ContextTypes.DEFAULT_TY
         "• Check history\n\n"
         "**Cost:** 1 credit per check\n"
         "**Your Credits:** {}\n\n"
-        "🔴 **Important:** This is a simulation. No actual Facebook accounts are accessed or modified.".format(get_user_credits(query.from_user.id)),
+        "🔴 **Important:** This is a simulation.".format(get_user_credits(query.from_user.id)),
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -348,7 +333,6 @@ async def fb_check_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Check credits
     user_id = query.from_user.id
     credits = get_user_credits(user_id)
     
@@ -380,7 +364,6 @@ async def fb_check_with_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Check credits
     user_id = query.from_user.id
     credits = get_user_credits(user_id)
     
@@ -417,7 +400,6 @@ async def handle_fb_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text.strip()
     user_id = update.effective_user.id
     
-    # Deduct credits
     cost = 2 if check_type == 'with_otp' else 1
     
     conn = sqlite3.connect('bot_data.db')
@@ -428,10 +410,8 @@ async def handle_fb_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     status_msg = await update.message.reply_text("🔍 Processing...")
     
-    # Perform check
     result = FacebookChecker.check_account(phone)
     
-    # Prepare response
     response = f"📱 **Phone:** `{phone}`\n\n"
     response += f"{result['message']}\n\n"
     
@@ -442,7 +422,6 @@ async def handle_fb_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response += f"• Last Active: {result.get('account_info', {}).get('last_active', 'Unknown')}\n\n"
         
         if check_type == 'with_otp' and result['can_recover']:
-            # Send OTP (SIMULATED)
             await status_msg.edit_text("📨 Sending recovery OTP...")
             await asyncio.sleep(2)
             
@@ -453,8 +432,7 @@ async def handle_fb_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if otp_result['success']:
                 response += f"📱 **SIMULATED OTP:** `{otp_result['otp']}`\n"
                 response += f"⏱️ Expires in: {otp_result['expires_in']} seconds\n"
-                response += "\n⚠️ **This is a SIMULATION** - No actual OTP was sent to the phone number.\n"
-                response += "In a real implementation, Facebook would send an SMS to the number."
+                response += "\n⚠️ **This is a SIMULATION**"
             
             otp_sent = otp_result['success']
         else:
@@ -464,18 +442,16 @@ async def handle_fb_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         otp_sent = False
     
-    # Log to database
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
-    c.execute("INSERT INTO fb_checks VALUES (?, ?, ?, ?, ?, ?, ?)",
-              (None, user_id, phone, result['status'], 
+    c.execute("INSERT INTO fb_checks (user_id, phone_number, status, account_found, otp_sent, checked_at) VALUES (?, ?, ?, ?, ?, ?)",
+              (user_id, phone, result['status'], 
                1 if result['account_found'] else 0,
                1 if otp_sent else 0,
                datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
     
-    # Log usage
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
     c.execute("INSERT INTO user_usage VALUES (?, ?, ?)",
@@ -546,8 +522,6 @@ async def fb_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Reverse-engineering violates ToS\n"
         "• Rate limits and captchas\n"
         "• Legal restrictions in many countries\n\n"
-        "**Educational Purpose:**\n"
-        "This demonstrates how account checking systems work conceptually.\n\n"
         "For real Facebook account recovery, visit:\n"
         "https://www.facebook.com/login/identify"
     )
@@ -581,36 +555,50 @@ async def get_number_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
-# Placeholder functions for other features
 async def get_tempmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await query.message.edit_text("Temp mail feature coming soon!")
+    """Get temporary email"""
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_text("📧 **Temporary Email Feature**\n\nComing soon! Stay tuned.")
 
 async def two_fa_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await query.message.edit_text("2FA feature coming soon!")
+    """2FA menu"""
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_text("🔐 **2FA Feature**\n\nComing soon! Stay tuned.")
 
 async def balances_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await query.message.edit_text("Balances feature coming soon!")
+    """Balances menu"""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    credits = get_user_credits(user_id)
+    await query.message.edit_text(f"💰 **Your Balance**\n\n💎 Credits: `{credits}`\n\nContact admin to purchase more credits!")
 
 async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await query.message.edit_text("Withdraw feature coming soon!")
+    """Withdraw menu"""
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_text("💸 **Withdraw Feature**\n\nComing soon! Stay tuned.")
 
 async def support_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await query.message.edit_text("Support feature coming soon!")
+    """Support menu"""
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_text("🆘 **Support**\n\nContact @YourSupportUsername for any issues or questions!")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
     user = update.effective_user
     
-    # Save user to database
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, ?)",
-              (user.id, user.username, user.first_name, 
-               datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, 10))  # Give 10 free credits
+    c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, join_date, is_banned, credits) VALUES (?, ?, ?, ?, ?, ?)",
+              (user.id, user.username or "", user.first_name, 
+               datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, 10))
     conn.commit()
     conn.close()
     
-    # Set bot commands
     commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("menu", "Show main menu"),
@@ -667,7 +655,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**⚠️ DISCLAIMER:**\n"
         "Facebook checker is a DEMO/SIMULATION.\n"
         "No real Facebook accounts are accessed.\n\n"
-        "**Need help?** Contact @support_username"
+        "**Need help?** Contact @YourSupportUsername"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -675,7 +663,6 @@ def main():
     """Main function to run the bot"""
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Add conversation handlers
     fb_conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(fb_check_single, pattern="fb_check_single"),
@@ -685,13 +672,11 @@ def main():
         fallbacks=[]
     )
     
-    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CommandHandler("help", help_command))
     
-    # Callback handlers
     app.add_handler(CallbackQueryHandler(main_menu, pattern="main_menu"))
     app.add_handler(CallbackQueryHandler(get_number_menu, pattern="get_number"))
     app.add_handler(CallbackQueryHandler(facebook_checker_menu, pattern="fb_checker"))
@@ -700,13 +685,16 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="admin_panel"))
     app.add_handler(CallbackQueryHandler(admin_stats, pattern="admin_stats"))
     app.add_handler(CallbackQueryHandler(admin_fb_logs, pattern="admin_fb_logs"))
+    app.add_handler(CallbackQueryHandler(get_tempmail, pattern="get_tempmail"))
+    app.add_handler(CallbackQueryHandler(two_fa_menu, pattern="two_fa"))
+    app.add_handler(CallbackQueryHandler(balances_menu, pattern="balances"))
+    app.add_handler(CallbackQueryHandler(withdraw_menu, pattern="withdraw"))
+    app.add_handler(CallbackQueryHandler(support_menu, pattern="support"))
     
-    # Add conversation handlers
     app.add_handler(fb_conv_handler)
     
     print("🤖 Multi-Tool Bot is running...")
-    print("⚠️ Facebook Checker is in DEMO MODE")
-    print("⚠️ No actual Facebook data is accessed")
+    print(f"Bot Token: {BOT_TOKEN[:10]}...")
     print("Admin IDs:", ADMIN_IDS)
     print("Press Ctrl+C to stop")
     
