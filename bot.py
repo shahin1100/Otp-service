@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-BOT_TOKEN = "8343363851:AAET2wh52oAgXrGEd_IDCEdfZNUUzQ7rNKM"  # আপনার টোকেন যোগ করা হয়েছে
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # আপনার টোকেন যোগ করা হয়েছে
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "8343363851").split(","))) if os.getenv("ADMIN_IDS") else [8343363851]
 
 if not BOT_TOKEN:
