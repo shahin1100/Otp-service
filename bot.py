@@ -50,6 +50,11 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS user_numbers
                  (user_id INTEGER PRIMARY KEY, number_id INTEGER, number TEXT, country TEXT)''')
     
+    # Add admin user if not exists
+    for admin_id in ADMIN_IDS:
+        c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, join_date, is_banned, credits) VALUES (?, ?, ?, ?, ?, ?)",
+                  (admin_id, "admin", "Admin", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, 1000))
+    
     conn.commit()
     conn.close()
 
@@ -237,8 +242,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check if waiting for 2FA key
         if context.user_data.get('awaiting_2fa'):
             await generate_2fa_direct(update, context)
-        elif context.user_data.get('awaiting_number_input'):
-            await handle_number_input(update, context)
         elif context.user_data.get('awaiting_fb_check'):
             await fb_check_handle(update, context)
         else:
@@ -249,6 +252,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== 2FA DIRECT (NO SAVING) ====================
 async def twofa_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Clear any existing 2FA state
+    context.user_data.pop('awaiting_2fa', None)
+    context.user_data.pop('in_2fa_session', None)
+    
     await update.message.reply_text(
         "🔐 **2FA Code Generator**\n\n"
         "Send me your TOTP secret key and I'll generate live OTP codes!\n\n"
@@ -270,8 +277,17 @@ async def generate_2fa_direct(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not test or len(test) != 6:
             raise ValueError("Invalid")
         
-        # Send initial message
-        msg = await update.message.reply_text("⏳ Generating OTP...")
+        # Mark that user is in 2FA session
+        context.user_data['in_2fa_session'] = True
+        context.user_data['current_secret'] = secret
+        
+        # Send initial message with inline buttons
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Generate New OTP", callback_data="2fa_new_same")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_main")]
+        ])
+        
+        msg = await update.message.reply_text("⏳ Generating OTP...", reply_markup=keyboard)
         
         # Live countdown loop (30 seconds)
         for _ in range(30):
@@ -289,11 +305,12 @@ async def generate_2fa_direct(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"`{otp}`\n\n"
                 f"⏳ **Expires in:** `{remaining}` seconds\n"
                 f"`{bar}`\n\n"
-                f"🔄 New code will generate automatically..."
+                f"🔄 Click 'Generate New OTP' for new code with SAME key\n"
+                f"📝 Or send a NEW key"
             )
             
             try:
-                await msg.edit_text(text, parse_mode="Markdown")
+                await msg.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
             except:
                 pass
             
@@ -302,24 +319,16 @@ async def generate_2fa_direct(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             await asyncio.sleep(0.5)
         
-        # OTP expired
-        try:
-            await msg.delete()
-        except:
-            pass
-        
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Generate New OTP", callback_data="2fa_new")],
-            [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_main")]
-        ])
-        
-        await update.message.reply_text(
-            "⌛ **OTP Expired!**\n\nClick below to generate a new code with the SAME key, or send a NEW key.",
-            parse_mode="Markdown",
-            reply_markup=keyboard
+        # OTP expired - keep same buttons
+        text = (
+            f"⌛ **OTP Expired!**\n\n"
+            f"Click 'Generate New OTP' to get a new code with the SAME key,\n"
+            f"or send a NEW key."
         )
         
-        # Keep waiting for new key
+        await msg.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        
+        # Keep waiting for new key or button press
         context.user_data['awaiting_2fa'] = True
         
     except Exception as e:
@@ -330,17 +339,81 @@ async def generate_2fa_direct(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Still waiting for valid key
         context.user_data['awaiting_2fa'] = True
 
-async def twofa_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def twofa_new_same(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate new OTP with the same secret"""
     query = update.callback_query
     await query.answer()
     
-    await query.message.edit_text(
-        "🔐 **2FA Code Generator**\n\n"
-        "Send me your TOTP secret key again:\n\n"
-        "**Example:** `JBSWY3DPEHPK3PXP`",
-        parse_mode="Markdown"
-    )
-    context.user_data['awaiting_2fa'] = True
+    secret = context.user_data.get('current_secret')
+    
+    if not secret:
+        await query.message.edit_text(
+            "🔐 **2FA Code Generator**\n\n"
+            "Send me your TOTP secret key:\n\n"
+            "**Example:** `JBSWY3DPEHPK3PXP`",
+            parse_mode="Markdown"
+        )
+        context.user_data['awaiting_2fa'] = True
+        return
+    
+    try:
+        totp = pyotp.TOTP(secret)
+        test = totp.now()
+        if not test or len(test) != 6:
+            raise ValueError("Invalid")
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Generate New OTP", callback_data="2fa_new_same")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_main")]
+        ])
+        
+        msg = await query.message.edit_text("⏳ Generating OTP...", reply_markup=keyboard)
+        
+        # Live countdown loop
+        for _ in range(30):
+            current_time = int(time.time())
+            remaining = totp.interval - (current_time % totp.interval)
+            otp = totp.at(current_time)
+            
+            bar_length = 20
+            filled = int(bar_length * (30 - remaining) / 30)
+            bar = "█" * filled + "░" * (bar_length - filled)
+            
+            text = (
+                f"🔐 **Your OTP Code**\n\n"
+                f"`{otp}`\n\n"
+                f"⏳ **Expires in:** `{remaining}` seconds\n"
+                f"`{bar}`\n\n"
+                f"🔄 Click 'Generate New OTP' for new code with SAME key\n"
+                f"📝 Or send a NEW key"
+            )
+            
+            try:
+                await msg.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+            except:
+                pass
+            
+            if remaining <= 1:
+                break
+            
+            await asyncio.sleep(0.5)
+        
+        text = (
+            f"⌛ **OTP Expired!**\n\n"
+            f"Click 'Generate New OTP' to get a new code with the SAME key,\n"
+            f"or send a NEW key."
+        )
+        
+        await msg.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        
+        context.user_data['awaiting_2fa'] = True
+        
+    except Exception as e:
+        await query.message.edit_text(
+            f"❌ **Invalid Key!**\n\nPlease send a valid TOTP secret key.",
+            parse_mode="Markdown"
+        )
+        context.user_data['awaiting_2fa'] = True
 
 # ==================== NUMBER MENU ====================
 async def number_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -650,7 +723,7 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**Available Features:**\n\n"
         "📱 **Number** - Get virtual numbers for SMS verification\n"
         "📧 **TempMail** - Create temporary email addresses\n"
-        "🔐 **2FA** - Send secret key, get live OTP with countdown (No saving)\n"
+        "🔐 **2FA** - Send secret key, get live OTP with countdown\n"
         "💰 **Balance** - Check your credits\n"
         "💸 **Withdraw** - Withdraw your earnings\n\n"
         "**Commands:**\n"
@@ -743,10 +816,17 @@ async def fb_check_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     cost = 2 if check_type == 'otp' else 1
     
+    # Check credits
+    if get_user_credits(user_id) < cost:
+        await update.message.reply_text("❌ Insufficient credits!", reply_markup=get_bottom_menu())
+        context.user_data.pop('awaiting_fb_check', None)
+        context.user_data.pop('fb_check_type', None)
+        return
+    
     # Deduct credits
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
-    c.execute("UPDATE users SET credits = credits - ? WHERE user_id = ? AND credits >= ?", (cost, user_id, cost))
+    c.execute("UPDATE users SET credits = credits - ? WHERE user_id = ?", (cost, user_id))
     conn.commit()
     conn.close()
     
@@ -818,6 +898,11 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
+    # Clear 2FA session
+    context.user_data.pop('awaiting_2fa', None)
+    context.user_data.pop('in_2fa_session', None)
+    context.user_data.pop('current_secret', None)
+    
     user = update.effective_user
     welcome_text = (
         f"👋 **Welcome back!**\n\n"
@@ -838,11 +923,13 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== MY ID ====================
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    is_admin_user = "✅ Yes" if is_admin(user.id) else "❌ No"
     await update.message.reply_text(
         f"🆔 **Your Information**\n\n"
         f"**User ID:** `{user.id}`\n"
         f"**Username:** @{user.username or 'None'}\n"
         f"**First Name:** {user.first_name}\n"
+        f"**Admin:** {is_admin_user}\n"
         f"💎 **Credits:** {get_user_credits(user.id)}",
         parse_mode="Markdown",
         reply_markup=get_bottom_menu()
@@ -850,8 +937,10 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ADMIN PANEL ====================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Unauthorized access!")
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Unauthorized access! You are not an admin.")
         return
     
     keyboard = InlineKeyboardMarkup([
@@ -939,7 +1028,7 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
             success += 1
         except:
             failed += 1
-        await asyncio.sleep(0.05)  # Avoid flood wait
+        await asyncio.sleep(0.05)
     
     await status_msg.edit_text(
         f"✅ **Broadcast Complete!**\n\n"
@@ -983,7 +1072,6 @@ async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ban_user(user_id):
             await update.message.reply_text(f"✅ User `{user_id}` has been banned!", parse_mode="Markdown")
             
-            # Notify the banned user
             try:
                 await context.bot.send_message(chat_id=user_id, text="❌ You have been banned from using this bot!")
             except:
@@ -1027,7 +1115,6 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if unban_user(user_id):
             await update.message.reply_text(f"✅ User `{user_id}` has been unbanned!", parse_mode="Markdown")
             
-            # Notify the unbanned user
             try:
                 await context.bot.send_message(chat_id=user_id, text="✅ You have been unbanned! You can use the bot again.")
             except:
@@ -1233,7 +1320,7 @@ def main():
     app.add_handler(CallbackQueryHandler(tmp_new, pattern="tmp_new"))
     app.add_handler(CallbackQueryHandler(tmp_delete, pattern="tmp_delete"))
     
-    app.add_handler(CallbackQueryHandler(twofa_new, pattern="2fa_new"))
+    app.add_handler(CallbackQueryHandler(twofa_new_same, pattern="2fa_new_same"))
     
     app.add_handler(CallbackQueryHandler(fb_menu, pattern="fb_menu"))
     app.add_handler(CallbackQueryHandler(fb_check_prompt, pattern="fb_check"))
@@ -1261,10 +1348,10 @@ def main():
     print("   [📱 Number] [📧 TempMail] [🔐 2FA]")
     print("   [💰 Balance] [💸 Withdraw] [🆘 Help]")
     print("=" * 50)
-    print("✅ 2FA: Direct - Send key, get live OTP (No saving)")
+    print("✅ 2FA: Direct - Send key, get live OTP with buttons")
     print("✅ Admin Panel: Broadcast, Ban, Unban, Add Numbers, Add Credits")
     print("=" * 50)
-    print(f"👑 Admin ID: {ADMIN_IDS}")
+    print(f"👑 Admin IDs: {ADMIN_IDS}")
     print("=" * 50)
     print("Bot will run 24/7 without crashes!")
     print("Press Ctrl+C to stop")
