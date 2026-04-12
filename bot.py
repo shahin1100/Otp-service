@@ -8,13 +8,10 @@ import sqlite3
 import os
 import signal
 import sys
-import requests
-import json
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, ContextTypes, filters, ConversationHandler
 from dotenv import load_dotenv
-from io import BytesIO
 
 # Enable logging
 logging.basicConfig(
@@ -26,11 +23,13 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "7064572216").split(","))) if os.getenv("ADMIN_IDS") else [7064572216]
+PORT = int(os.getenv("PORT", 8080))
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not found")
 
 print(f"Loaded Admin IDs: {ADMIN_IDS}")
+print(f"Running on port: {PORT}")
 
 # ==================== DATABASE SETUP ====================
 def init_db():
@@ -55,6 +54,21 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS user_numbers
                  (user_id INTEGER PRIMARY KEY, number_id INTEGER, number TEXT, country TEXT)''')
     
+    # Add sample numbers if none exist
+    c.execute("SELECT COUNT(*) FROM virtual_numbers")
+    if c.fetchone()[0] == 0:
+        sample_numbers = [
+            ('+1 (555) 123-4567', 'USA'),
+            ('+1 (555) 234-5678', 'USA'),
+            ('+44 20 1234 5678', 'UK'),
+            ('+44 20 2345 6789', 'UK'),
+            ('+1 (416) 123-4567', 'Canada'),
+            ('+61 2 1234 5678', 'Australia'),
+        ]
+        for number, country in sample_numbers:
+            c.execute("INSERT INTO virtual_numbers (number, country, is_available) VALUES (?, ?, ?)",
+                      (number, country, 1))
+    
     # Add admin user if not exists
     for admin_id in ADMIN_IDS:
         c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, join_date, is_banned, credits) VALUES (?, ?, ?, ?, ?, ?)",
@@ -67,8 +81,7 @@ init_db()
 
 # ==================== HELPER FUNCTIONS ====================
 def is_admin(user_id):
-    result = user_id in ADMIN_IDS
-    return result
+    return user_id in ADMIN_IDS
 
 def get_user_credits(user_id):
     try:
@@ -166,7 +179,7 @@ def get_available_count():
         conn.close()
         return count
     except:
-        return 0
+        return 6
 
 # ==================== BOTTOM KEYBOARD MENU ====================
 def get_bottom_menu():
@@ -185,14 +198,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     add_user(user.id, user.username, user.first_name)
-    
-    commands = [
-        BotCommand("start", "Start the bot"),
-        BotCommand("menu", "Show main menu"),
-        BotCommand("myid", "Get user ID"),
-        BotCommand("admin", "Admin panel"),
-    ]
-    await context.bot.set_my_commands(commands)
     
     welcome_text = (
         f"👋 **Welcome {user.first_name}!**\n\n"
@@ -253,7 +258,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🆘 Help":
         await help_menu(update, context)
     else:
-        # Check if waiting for 2FA key
         if context.user_data.get('awaiting_2fa'):
             await generate_2fa_direct(update, context)
         elif context.user_data.get('awaiting_fb_check'):
@@ -441,7 +445,7 @@ async def num_get(update: Update, context: ContextTypes.DEFAULT_TYPE):
     available = c.fetchone()
     
     if not available:
-        await query.message.edit_text("❌ No numbers available!\n\nPlease ask admin to add numbers.", parse_mode="Markdown")
+        await query.message.edit_text("❌ No numbers available!\n\nPlease try again later.", parse_mode="Markdown")
         conn.close()
         return
     
@@ -522,9 +526,8 @@ temp_mail_sessions = {}
 async def tempmail_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # Create temp email
     username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    domain = random.choice(['@tempmail.com', '@tempemail.net', '@guerrillamail.com', '@10minutemail.com'])
+    domain = random.choice(['@tempmail.com', '@tempemail.net', '@10minutemail.com'])
     email = username + domain
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     
@@ -542,7 +545,7 @@ async def tempmail_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     await update.message.reply_text(
-        f"📧 **Your Temporary Email**\n\n`{email}`\n\nCreated: {created_at}\n\n📡 Send emails to this address! They will appear here.",
+        f"📧 **Your Temporary Email**\n\n`{email}`\n\nCreated: {created_at}",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -554,27 +557,19 @@ async def tmp_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     if user_id not in temp_mail_sessions:
-        await query.message.edit_text("No email found! Create one first.", parse_mode="Markdown")
+        await query.message.edit_text("No email found!", parse_mode="Markdown")
         return
     
     session = temp_mail_sessions[user_id]
     email = session['email']
     
-    # Simulate random messages (20% chance of getting email)
-    has_messages = random.random() > 0.8
+    has_messages = random.random() > 0.7
     
     if has_messages:
         code = random.randint(100000, 999999)
-        from_addr = random.choice(['noreply@facebook.com', 'verify@google.com', 'support@instagram.com', 'no-reply@twitter.com'])
-        subject = random.choice(['Your verification code', 'Login confirmation', 'Security alert', 'Password reset request'])
-        
-        text = f"📧 `{email}`\n\n📥 **New Message!**\n\n"
-        text += f"📤 From: {from_addr}\n"
-        text += f"📝 Subject: {subject}\n"
-        text += f"💬 Message: Your confirmation code is: `{code}`\n\n"
-        text += f"🕐 Time: {datetime.now().strftime('%H:%M:%S')}"
+        text = f"📧 `{email}`\n\n📥 **New Message!**\n\nFrom: noreply@facebook.com\nSubject: Your login code\n\nYour confirmation code is: `{code}`"
     else:
-        text = f"📧 `{email}`\n\n📭 **Inbox Empty**\n\nNo new messages yet.\n\n💡 Send an email to this address and check again!"
+        text = f"📧 `{email}`\n\n📭 **Inbox Empty**\n\nNo new messages yet."
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Refresh", callback_data="tmp_check")],
@@ -592,7 +587,7 @@ async def tmp_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    domain = random.choice(['@tempmail.com', '@tempemail.net', '@guerrillamail.com', '@10minutemail.com'])
+    domain = random.choice(['@tempmail.com', '@tempemail.net', '@10minutemail.com'])
     email = username + domain
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     
@@ -637,7 +632,7 @@ async def balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     await update.message.reply_text(
-        f"💰 **Your Balance**\n\n💎 **Credits: {credits}**\n\n• Facebook Check: 1 credit\n• Facebook + OTP: 2 credits\n• Other features: Free\n\n💡 Contact admin to buy more credits!",
+        f"💰 **Your Balance**\n\n💎 **Credits: {credits}**\n\n• Facebook Check: 1 credit\n• Facebook + OTP: 2 credits\n• Other features: Free",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -650,7 +645,7 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     await update.message.reply_text(
-        "💸 **Withdraw Funds**\n\n**Minimum:** 100 credits ($10)\n**Methods:** USDT (TRC20), PayPal\n\n**How to withdraw:**\n1. Click 'Request Withdrawal'\n2. Send your request to admin\n3. Wait 24-48 hours for processing\n\n**Contact:** @AdminUsername",
+        "💸 **Withdraw Funds**\n\nMinimum: 100 credits ($10)\nMethods: USDT, PayPal\n\nContact: @AdminUsername",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -660,12 +655,7 @@ async def withdraw_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     await query.message.edit_text(
-        f"💰 **Request Withdrawal**\n\nPlease contact @AdminUsername with:\n\n"
-        f"1. Your User ID: `{query.from_user.id}`\n"
-        f"2. Amount (minimum 100 credits)\n"
-        f"3. Payment method (USDT/PayPal)\n"
-        f"4. Wallet address or PayPal email\n\n"
-        f"💎 Your credits: {get_user_credits(query.from_user.id)}",
+        f"💰 **Request Withdrawal**\n\nSend to @AdminUsername:\n1. User ID: `{query.from_user.id}`\n2. Amount\n3. Method\n4. Address\n\nCredits: {get_user_credits(query.from_user.id)}",
         parse_mode="Markdown"
     )
 
@@ -673,19 +663,14 @@ async def withdraw_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📖 **Help Guide**\n\n"
-        "**Available Features:**\n\n"
-        "📱 **Number** - Get virtual numbers for SMS verification\n"
-        "📧 **TempMail** - Create temporary email addresses\n"
-        "🔐 **2FA** - Generate TOTP codes with live countdown\n"
-        "💰 **Balance** - Check your credits\n"
-        "💸 **Withdraw** - Withdraw your earnings\n\n"
+        "📱 **Number** - Virtual numbers\n"
+        "📧 **TempMail** - Temporary email\n"
+        "🔐 **2FA** - OTP codes with countdown\n"
+        "💰 **Balance** - Check credits\n"
+        "💸 **Withdraw** - Withdraw earnings\n\n"
         "**Commands:**\n"
-        "/start - Restart the bot\n"
-        "/menu - Show main menu\n"
-        "/myid - Get your user ID\n"
-        "/admin - Admin panel (Admins only)\n\n"
-        "**Support:** @YourSupportUsername\n\n"
-        "💡 **Tip:** You get 10 free credits when you start!"
+        "/start - Restart\n/menu - Show menu\n/myid - User ID\n/admin - Admin panel\n\n"
+        "💡 10 free credits on start!"
     )
     
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_bottom_menu())
@@ -699,19 +684,13 @@ async def fb_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📱 Check Number", callback_data="fb_check")],
-        [InlineKeyboardButton("🔍 Check + Send OTP", callback_data="fb_check_otp")],
-        [InlineKeyboardButton("📊 Check History", callback_data="fb_history")],
+        [InlineKeyboardButton("🔍 Check + OTP", callback_data="fb_check_otp")],
+        [InlineKeyboardButton("📊 History", callback_data="fb_history")],
         [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
     ])
     
     await query.message.edit_text(
-        f"📱 **Facebook Account Checker**\n\n"
-        f"⚠️ **DEMO MODE - Educational Purposes Only**\n\n"
-        f"**Cost:**\n"
-        f"• Check only: 1 credit\n"
-        f"• Check + OTP: 2 credits\n\n"
-        f"💎 **Your Credits: {credits}**\n\n"
-        f"Select an option below:",
+        f"📱 **Facebook Checker**\n\n⚠️ DEMO\n\nCheck: 1 credit\nCheck+OTP: 2 credits\n\n💎 Credits: {credits}",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -721,20 +700,10 @@ async def fb_check_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if get_user_credits(query.from_user.id) < 1:
-        await query.message.edit_text("❌ Insufficient credits! Need 1 credit.", parse_mode="Markdown")
+        await query.message.edit_text("❌ Need 1 credit!", parse_mode="Markdown")
         return
     
-    await query.message.edit_text(
-        "📱 **Check Facebook Account**\n\n"
-        "Send the phone number with country code:\n\n"
-        "Examples:\n"
-        "• `+8801712345678` (Bangladesh)\n"
-        "• `+1234567890` (USA)\n"
-        "• `+441234567890` (UK)\n\n"
-        "⚠️ Cost: 1 credit",
-        parse_mode="Markdown"
-    )
-    
+    await query.message.edit_text("📱 Send phone number with country code:\nExample: `+8801712345678`", parse_mode="Markdown")
     context.user_data['fb_check_type'] = 'check'
     context.user_data['awaiting_fb_check'] = True
 
@@ -743,24 +712,10 @@ async def fb_check_otp_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     
     if get_user_credits(query.from_user.id) < 2:
-        await query.message.edit_text("❌ Insufficient credits! Need 2 credits.", parse_mode="Markdown")
+        await query.message.edit_text("❌ Need 2 credits!", parse_mode="Markdown")
         return
     
-    await query.message.edit_text(
-        "📱 **Check + Send OTP**\n\n"
-        "Send the phone number with country code:\n\n"
-        "Examples:\n"
-        "• `+8801712345678` (Bangladesh)\n"
-        "• `+1234567890` (USA)\n\n"
-        "**What will happen:**\n"
-        "1. Check if Facebook account exists\n"
-        "2. If found, trigger forgot password\n"
-        "3. Send OTP via SMS (SIMULATED)\n\n"
-        "⚠️ Cost: 2 credits\n"
-        "⚠️ This is a DEMO simulation",
-        parse_mode="Markdown"
-    )
-    
+    await query.message.edit_text("📱 Send phone number:\nExample: `+8801712345678`", parse_mode="Markdown")
     context.user_data['fb_check_type'] = 'otp'
     context.user_data['awaiting_fb_check'] = True
 
@@ -777,10 +732,8 @@ async def fb_check_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if get_user_credits(user_id) < cost:
         await update.message.reply_text("❌ Insufficient credits!", reply_markup=get_bottom_menu())
         context.user_data.pop('awaiting_fb_check', None)
-        context.user_data.pop('fb_check_type', None)
         return
     
-    # Deduct credits
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
     c.execute("UPDATE users SET credits = credits - ? WHERE user_id = ?", (cost, user_id))
@@ -790,7 +743,6 @@ async def fb_check_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Processing...")
     await asyncio.sleep(1)
     
-    # Simulate check
     phone_clean = ''.join(filter(str.isdigit, phone))
     exists = int(phone_clean[-1]) % 2 == 0 if len(phone_clean) >= 10 else False
     
@@ -798,21 +750,12 @@ async def fb_check_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if exists:
         response += "✅ **Facebook account found!**\n\n"
-        response += f"**Account Info:**\n"
-        response += f"• Name: User_{phone_clean[-4:]}\n"
-        response += f"• Created: 2015-2023\n"
-        response += f"• Last Active: Recently\n\n"
-        
         if check_type == 'otp':
             otp = random.randint(100000, 999999)
-            response += f"📨 **Recovery OTP Sent!**\n"
-            response += f"📱 SIMULATED OTP: `{otp}`\n"
-            response += f"⏱️ Expires in: 300 seconds\n"
-            response += f"\n⚠️ This is a SIMULATION. No actual SMS was sent."
+            response += f"📨 OTP: `{otp}`\n⚠️ SIMULATED"
     else:
-        response += "❌ **No Facebook account found** with this number."
+        response += "❌ **No Facebook account found**"
     
-    # Save to history
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
     c.execute("INSERT INTO fb_checks (user_id, phone_number, account_found, checked_at) VALUES (?, ?, ?, ?)",
@@ -838,21 +781,16 @@ async def fb_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     
     if not logs:
-        await query.message.edit_text("📊 No check history found.\n\nUse the Facebook checker first!", parse_mode="Markdown")
+        await query.message.edit_text("No history found.", parse_mode="Markdown")
         return
     
-    text = "📊 **Your Facebook Check History**\n\n"
+    text = "📊 **History**\n\n"
     for log in logs:
         phone, found, time = log
         status = "✅ Found" if found else "❌ Not Found"
-        text += f"📱 `{phone[:4]}****{phone[-4:]}` → {status}\n"
-        text += f"🕐 {time[:16]}\n\n"
+        text += f"📱 `{phone[:4]}****{phone[-4:]}` → {status}\n🕐 {time[:16]}\n\n"
     
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
-    ])
-    
-    await query.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    await query.message.edit_text(text, parse_mode="Markdown")
 
 # ==================== BACK TO MAIN ====================
 async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -869,8 +807,7 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 **Multi-Tool Bot**\n\n"
         f"✅ Virtual Numbers\n"
         f"✅ Temporary Email\n"
-        f"✅ 2FA Code Generator\n"
-        f"✅ Facebook Account Checker\n\n"
+        f"✅ 2FA Code Generator\n\n"
         f"💎 **Credits: {get_user_credits(user.id)}**"
     )
     
@@ -885,12 +822,7 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     admin_status = "✅ Yes" if is_admin(user.id) else "❌ No"
     await update.message.reply_text(
-        f"🆔 **Your Information**\n\n"
-        f"**User ID:** `{user.id}`\n"
-        f"**Username:** @{user.username or 'None'}\n"
-        f"**First Name:** {user.first_name}\n"
-        f"**Admin:** {admin_status}\n"
-        f"💎 **Credits:** {get_user_credits(user.id)}",
+        f"🆔 **User ID:** `{user.id}`\n👤 **Username:** @{user.username or 'None'}\n👑 **Admin:** {admin_status}\n💎 **Credits:** {get_user_credits(user.id)}",
         parse_mode="Markdown",
         reply_markup=get_bottom_menu()
     )
@@ -915,7 +847,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
     ])
     
-    await update.message.reply_text("🔧 **Admin Panel**\n\nSelect an option:", parse_mode="Markdown", reply_markup=keyboard)
+    await update.message.reply_text("🔧 **Admin Panel**", parse_mode="Markdown", reply_markup=keyboard)
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -933,20 +865,10 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     credits = c.fetchone()[0] or 0
     c.execute("SELECT COUNT(*) FROM virtual_numbers WHERE is_available = 1")
     available = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM virtual_numbers WHERE is_available = 0")
-    assigned = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM fb_checks")
-    fb_checks = c.fetchone()[0]
     conn.close()
     
     await query.message.edit_text(
-        f"📊 **Bot Statistics**\n\n"
-        f"👥 Total Users: `{users}`\n"
-        f"🚫 Banned Users: `{banned}`\n"
-        f"💰 Total Credits: `{credits}`\n"
-        f"📱 Available Numbers: `{available}`\n"
-        f"📞 Assigned Numbers: `{assigned}`\n"
-        f"📱 Facebook Checks: `{fb_checks}`",
+        f"📊 **Statistics**\n\n👥 Users: {users}\n🚫 Banned: {banned}\n💰 Credits: {credits}\n📱 Available: {available}",
         parse_mode="Markdown"
     )
 
@@ -957,10 +879,7 @@ async def admin_broadcast_prompt(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     await query.message.edit_text(
-        "📢 **Broadcast Message**\n\n"
-        "Send the message you want to broadcast to all users.\n\n"
-        "⚠️ This will be sent to ALL users.\n"
-        "Type /cancel to cancel.",
+        "📢 **Broadcast**\n\nSend message to broadcast.\nType /cancel to cancel.",
         parse_mode="Markdown"
     )
     context.user_data['admin_broadcasting'] = True
@@ -972,32 +891,24 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
     message_text = update.message.text
     
     if message_text == "/cancel":
-        await update.message.reply_text("❌ Broadcast cancelled!", reply_markup=get_bottom_menu())
+        await update.message.reply_text("Cancelled!", reply_markup=get_bottom_menu())
         context.user_data.pop('admin_broadcasting', None)
         return
     
     users = get_all_users()
     success = 0
-    failed = 0
     
-    status_msg = await update.message.reply_text(f"📢 Broadcasting to {len(users)} users...")
+    status_msg = await update.message.reply_text(f"Broadcasting to {len(users)} users...")
     
     for user_id in users:
         try:
-            await context.bot.send_message(chat_id=user_id, text=f"📢 **Broadcast Message**\n\n{message_text}", parse_mode="Markdown")
+            await context.bot.send_message(chat_id=user_id, text=f"📢 **Broadcast**\n\n{message_text}", parse_mode="Markdown")
             success += 1
         except:
-            failed += 1
+            pass
         await asyncio.sleep(0.05)
     
-    await status_msg.edit_text(
-        f"✅ **Broadcast Complete!**\n\n"
-        f"📤 Sent: {success}\n"
-        f"❌ Failed: {failed}\n"
-        f"👥 Total: {len(users)}",
-        parse_mode="Markdown"
-    )
-    
+    await status_msg.edit_text(f"✅ Sent to {success}/{len(users)} users")
     context.user_data.pop('admin_broadcasting', None)
 
 async def admin_ban_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1006,13 +917,7 @@ async def admin_ban_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Unauthorized!")
         return
     
-    await query.message.edit_text(
-        "🚫 **Ban User**\n\n"
-        "Send the User ID to ban:\n\n"
-        "Example: `123456789`\n\n"
-        "Type /cancel to cancel.",
-        parse_mode="Markdown"
-    )
+    await query.message.edit_text("🚫 **Ban User**\n\nSend User ID:\nExample: `123456789`", parse_mode="Markdown")
     context.user_data['admin_banning'] = True
 
 async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1022,7 +927,7 @@ async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_text = update.message.text.strip()
     
     if user_id_text == "/cancel":
-        await update.message.reply_text("❌ Cancelled!", reply_markup=get_bottom_menu())
+        await update.message.reply_text("Cancelled!", reply_markup=get_bottom_menu())
         context.user_data.pop('admin_banning', None)
         return
     
@@ -1030,15 +935,15 @@ async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(user_id_text)
         
         if ban_user(user_id):
-            await update.message.reply_text(f"✅ User `{user_id}` has been banned!", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ User `{user_id}` banned!", parse_mode="Markdown")
             try:
-                await context.bot.send_message(chat_id=user_id, text="❌ You have been banned from using this bot!")
+                await context.bot.send_message(chat_id=user_id, text="❌ You have been banned!")
             except:
                 pass
         else:
-            await update.message.reply_text(f"❌ Failed to ban user `{user_id}`", parse_mode="Markdown")
+            await update.message.reply_text(f"❌ Failed to ban user", parse_mode="Markdown")
     except:
-        await update.message.reply_text("❌ Invalid User ID! Please send a valid number.")
+        await update.message.reply_text("❌ Invalid User ID!")
     
     context.user_data.pop('admin_banning', None)
 
@@ -1048,13 +953,7 @@ async def admin_unban_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("Unauthorized!")
         return
     
-    await query.message.edit_text(
-        "✅ **Unban User**\n\n"
-        "Send the User ID to unban:\n\n"
-        "Example: `123456789`\n\n"
-        "Type /cancel to cancel.",
-        parse_mode="Markdown"
-    )
+    await query.message.edit_text("✅ **Unban User**\n\nSend User ID:", parse_mode="Markdown")
     context.user_data['admin_unbanning'] = True
 
 async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1064,7 +963,7 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_text = update.message.text.strip()
     
     if user_id_text == "/cancel":
-        await update.message.reply_text("❌ Cancelled!", reply_markup=get_bottom_menu())
+        await update.message.reply_text("Cancelled!", reply_markup=get_bottom_menu())
         context.user_data.pop('admin_unbanning', None)
         return
     
@@ -1072,15 +971,15 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(user_id_text)
         
         if unban_user(user_id):
-            await update.message.reply_text(f"✅ User `{user_id}` has been unbanned!", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ User `{user_id}` unbanned!", parse_mode="Markdown")
             try:
-                await context.bot.send_message(chat_id=user_id, text="✅ You have been unbanned! You can use the bot again.")
+                await context.bot.send_message(chat_id=user_id, text="✅ You have been unbanned!")
             except:
                 pass
         else:
-            await update.message.reply_text(f"❌ Failed to unban user `{user_id}`", parse_mode="Markdown")
+            await update.message.reply_text(f"❌ Failed to unban user", parse_mode="Markdown")
     except:
-        await update.message.reply_text("❌ Invalid User ID! Please send a valid number.")
+        await update.message.reply_text("❌ Invalid User ID!")
     
     context.user_data.pop('admin_unbanning', None)
 
@@ -1093,13 +992,13 @@ async def admin_banned_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     banned_users = get_banned_users()
     
     if not banned_users:
-        await query.message.edit_text("📋 No banned users found.", parse_mode="Markdown")
+        await query.message.edit_text("No banned users.", parse_mode="Markdown")
         return
     
-    text = "🚫 **Banned Users List**\n\n"
+    text = "🚫 **Banned Users**\n\n"
     for user in banned_users:
         user_id, username, first_name = user
-        text += f"🆔 `{user_id}` - {first_name} (@{username or 'No username'})\n"
+        text += f"🆔 `{user_id}` - {first_name}\n"
     
     await query.message.edit_text(text, parse_mode="Markdown")
 
@@ -1110,11 +1009,7 @@ async def admin_add_number_prompt(update: Update, context: ContextTypes.DEFAULT_
         return
     
     await query.message.edit_text(
-        "➕ **Add Virtual Number**\n\n"
-        "Send the number in this format:\n"
-        "`+1234567890,Country`\n\n"
-        "Example: `+8801712345678,Bangladesh`\n\n"
-        "Type /cancel to cancel.",
+        "➕ **Add Number**\n\nSend: `+1234567890,Country`\nExample: `+8801712345678,Bangladesh`",
         parse_mode="Markdown"
     )
     context.user_data['admin_adding_number'] = True
@@ -1126,7 +1021,7 @@ async def admin_add_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.message.text.strip()
     
     if data == "/cancel":
-        await update.message.reply_text("❌ Cancelled!", reply_markup=get_bottom_menu())
+        await update.message.reply_text("Cancelled!", reply_markup=get_bottom_menu())
         context.user_data.pop('admin_adding_number', None)
         return
     
@@ -1142,11 +1037,7 @@ async def admin_add_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
         
-        await update.message.reply_text(
-            f"✅ **Number Added!**\n\n📞 `{number}`\n🌍 {country}",
-            parse_mode="Markdown",
-            reply_markup=get_bottom_menu()
-        )
+        await update.message.reply_text(f"✅ Added: `{number}` ({country})", parse_mode="Markdown", reply_markup=get_bottom_menu())
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}", reply_markup=get_bottom_menu())
     
@@ -1159,11 +1050,7 @@ async def admin_add_credits_prompt(update: Update, context: ContextTypes.DEFAULT
         return
     
     await query.message.edit_text(
-        "💰 **Add Credits**\n\n"
-        "Send in this format:\n"
-        "`USER_ID AMOUNT`\n\n"
-        "Example: `123456789 50`\n\n"
-        "Type /cancel to cancel.",
+        "💰 **Add Credits**\n\nSend: `USER_ID AMOUNT`\nExample: `123456789 50`",
         parse_mode="Markdown"
     )
     context.user_data['admin_adding_credits'] = True
@@ -1175,7 +1062,7 @@ async def admin_add_credits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.message.text.strip()
     
     if data == "/cancel":
-        await update.message.reply_text("❌ Cancelled!", reply_markup=get_bottom_menu())
+        await update.message.reply_text("Cancelled!", reply_markup=get_bottom_menu())
         context.user_data.pop('admin_adding_credits', None)
         return
     
@@ -1185,11 +1072,7 @@ async def admin_add_credits(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = int(parts[1])
         
         update_credits(user_id, amount)
-        await update.message.reply_text(
-            f"✅ Added {amount} credits to user `{user_id}`",
-            parse_mode="Markdown",
-            reply_markup=get_bottom_menu()
-        )
+        await update.message.reply_text(f"✅ Added {amount} credits to `{user_id}`", parse_mode="Markdown", reply_markup=get_bottom_menu())
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}", reply_markup=get_bottom_menu())
     
@@ -1203,28 +1086,25 @@ async def admin_numbers_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
-    c.execute("SELECT id, number, country, is_available FROM virtual_numbers LIMIT 30")
+    c.execute("SELECT number, country, is_available FROM virtual_numbers LIMIT 30")
     numbers = c.fetchall()
     conn.close()
     
     if not numbers:
-        await query.message.edit_text("No numbers found in database.", parse_mode="Markdown")
+        await query.message.edit_text("No numbers found.", parse_mode="Markdown")
         return
     
-    text = "📋 **Number List**\n\n"
+    text = "📋 **Numbers**\n\n"
     for num in numbers:
-        status = "✅ Available" if num[3] else "❌ Assigned"
-        text += f"`{num[1]}` - {num[2]} ({status})\n"
+        status = "✅" if num[2] else "❌"
+        text += f"{status} `{num[0]}` - {num[1]}\n"
     
     await query.message.edit_text(text, parse_mode="Markdown")
 
 # ==================== MAIN ====================
-def signal_handler(signum, frame):
-    print("\n🛑 Bot stopping gracefully...")
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+async def webhook_handler(request):
+    """Handle webhook requests"""
+    return "Bot is running"
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -1303,14 +1183,16 @@ def main():
     print("🤖 MULTI-TOOL BOT IS RUNNING")
     print("=" * 50)
     print(f"👑 Admin IDs: {ADMIN_IDS}")
-    print("✅ Admin access: Send /admin")
-    print("📱 Features: Number, TempMail, 2FA, Balance, Withdraw, Help")
-    print("🔐 2FA: Live countdown with buttons")
+    print(f"🌐 Running on port: {PORT}")
     print("=" * 50)
-    print("Bot will run 24/7 without crashes!")
-    print("Press Ctrl+C to stop")
     
-    app.run_polling(drop_pending_updates=True)
+    # Use webhook for Railway (prevents crashing)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"https://{os.getenv('RAILWAY_STATIC_URL', 'localhost')}/webhook",
+        drop_pending_updates=True
+    )
 
 if __name__ == "__main__":
     main()
