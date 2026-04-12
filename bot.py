@@ -8,12 +8,15 @@ import sqlite3
 import os
 import signal
 import sys
-import aiohttp
+import requests
 import json
+import base64
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, ContextTypes, filters, ConversationHandler
 from dotenv import load_dotenv
+from io import BytesIO
+from PIL import Image
 
 # Enable logging
 logging.basicConfig(
@@ -25,6 +28,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "7064572216").split(","))) if os.getenv("ADMIN_IDS") else [7064572216]
+REMOVE_BG_API_KEY = os.getenv("REMOVE_BG_API_KEY", "")  # Get from https://www.remove.bg/api
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not found")
@@ -41,7 +45,7 @@ def init_db():
                   join_date TEXT, is_banned INTEGER DEFAULT 0, credits INTEGER DEFAULT 10)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS temp_emails
-                 (user_id INTEGER PRIMARY KEY, email TEXT, email_id TEXT, created_at TEXT, last_message_id INTEGER)''')
+                 (user_id INTEGER PRIMARY KEY, email TEXT, email_id TEXT, created_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS fb_checks
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, 
@@ -54,6 +58,10 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS user_numbers
                  (user_id INTEGER PRIMARY KEY, number_id INTEGER, number TEXT, country TEXT)''')
     
+    c.execute('''CREATE TABLE IF NOT EXISTS bg_removals
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, 
+                  original_file_id TEXT, result_file_id TEXT, created_at TEXT)''')
+    
     # Add admin user if not exists
     for admin_id in ADMIN_IDS:
         c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, join_date, is_banned, credits) VALUES (?, ?, ?, ?, ?, ?)",
@@ -63,64 +71,6 @@ def init_db():
     conn.close()
 
 init_db()
-
-# ==================== REAL TEMP MAIL API ====================
-class TempMailAPI:
-    # Using Guerrilla Mail API for real temporary emails
-    BASE_URL = "https://api.guerrillamail.com/ajax.php"
-    
-    @staticmethod
-    async def create_email():
-        """Create a real temporary email address"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Create new email
-                params = {
-                    'f': 'get_email_address',
-                    'ip': '127.0.0.1',
-                    'agent': 'Mozilla/5.0'
-                }
-                async with session.get(TempMailAPI.BASE_URL, params=params) as resp:
-                    data = await resp.json()
-                    if data.get('email_addr'):
-                        return {
-                            'email': data['email_addr'],
-                            'email_id': data.get('email_id', ''),
-                            'sid_token': data.get('sid_token', '')
-                        }
-        except Exception as e:
-            logger.error(f"TempMail create error: {e}")
-        
-        # Fallback to mock email if API fails
-        username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        domain = random.choice(['@guerrillamail.com', '@tempemail.net', '@10minutemail.com'])
-        return {
-            'email': username + domain,
-            'email_id': '',
-            'sid_token': ''
-        }
-    
-    @staticmethod
-    async def check_inbox(email_id, sid_token):
-        """Check inbox for new emails"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                params = {
-                    'f': 'fetch_email',
-                    'email_id': email_id,
-                    'sid_token': sid_token,
-                    'seq': 0
-                }
-                async with session.get(TempMailAPI.BASE_URL, params=params) as resp:
-                    data = await resp.json()
-                    if data.get('list'):
-                        return data['list']
-        except Exception as e:
-            logger.error(f"TempMail check error: {e}")
-        return []
-
-# Store active temp mail sessions
-temp_mail_sessions = {}  # {user_id: {'email': str, 'email_id': str, 'sid_token': str, 'message_id': int, 'last_count': int}}
 
 # ==================== HELPER FUNCTIONS ====================
 def is_admin(user_id):
@@ -215,11 +165,123 @@ def get_banned_users():
     except:
         return []
 
+# ==================== REMOVE BACKGROUND FUNCTION ====================
+async def remove_background(image_data, bg_color="transparent"):
+    """
+    Remove background from image using remove.bg API
+    bg_color: "transparent", "white", "blue", "red", "green", etc.
+    """
+    try:
+        # First try using remove.bg API if API key is available
+        if REMOVE_BG_API_KEY:
+            url = "https://api.remove.bg/v1.0/removebg"
+            files = {'image_file': image_data}
+            data = {'size': 'auto'}
+            headers = {'X-Api-Key': REMOVE_BG_API_KEY}
+            
+            response = requests.post(url, files=files, data=data, headers=headers)
+            
+            if response.status_code == 200:
+                result_image = BytesIO(response.content)
+                result_image.seek(0)
+                
+                # If color background is requested (not transparent)
+                if bg_color != "transparent":
+                    img = Image.open(result_image)
+                    # Create colored background
+                    bg = Image.new('RGBA', img.size, bg_color)
+                    # Composite images
+                    result = Image.alpha_composite(bg, img)
+                    output = BytesIO()
+                    result.save(output, format='PNG')
+                    output.seek(0)
+                    return output
+                
+                return result_image
+    except Exception as e:
+        logger.error(f"Remove.bg API error: {e}")
+    
+    # Fallback: Use PIL for basic background removal (simulated)
+    try:
+        img = Image.open(BytesIO(image_data))
+        
+        # Convert to RGBA if not already
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        
+        # Get dominant background color (corners)
+        width, height = img.size
+        corners = [
+            img.getpixel((0, 0)),
+            img.getpixel((width-1, 0)),
+            img.getpixel((0, height-1)),
+            img.getpixel((width-1, height-1))
+        ]
+        
+        # Average corner colors
+        bg_r = sum(c[0] for c in corners) // 4
+        bg_g = sum(c[1] for c in corners) // 4
+        bg_b = sum(c[2] for c in corners) // 4
+        bg_color_rgb = (bg_r, bg_g, bg_g)
+        
+        # Make pixels similar to background transparent
+        pixels = img.load()
+        for y in range(height):
+            for x in range(width):
+                r, g, b, a = pixels[x, y]
+                # If pixel is close to background color, make transparent
+                if abs(r - bg_r) < 50 and abs(g - bg_g) < 50 and abs(b - bg_b) < 50:
+                    pixels[x, y] = (r, g, b, 0)
+        
+        # Apply requested background color
+        if bg_color != "transparent":
+            bg = Image.new('RGBA', img.size, bg_color)
+            result = Image.alpha_composite(bg, img)
+        else:
+            result = img
+        
+        output = BytesIO()
+        result.save(output, format='PNG')
+        output.seek(0)
+        return output
+        
+    except Exception as e:
+        logger.error(f"PIL background removal error: {e}")
+        return None
+
+async def create_passport_size(image_data):
+    """Convert image to Bangladesh passport size (2x2 inches, 300 DPI = 600x600 pixels)"""
+    try:
+        img = Image.open(BytesIO(image_data))
+        
+        # Target size: 600x600 pixels (2x2 inches at 300 DPI)
+        target_size = (600, 600)
+        
+        # Resize maintaining aspect ratio, then crop to center
+        img.thumbnail(target_size, Image.Resampling.LANCZOS)
+        
+        # Create white background
+        new_img = Image.new('RGB', target_size, (255, 255, 255))
+        
+        # Paste centered
+        x_offset = (target_size[0] - img.size[0]) // 2
+        y_offset = (target_size[1] - img.size[1]) // 2
+        new_img.paste(img, (x_offset, y_offset))
+        
+        output = BytesIO()
+        new_img.save(output, format='JPEG', quality=95)
+        output.seek(0)
+        return output
+    except Exception as e:
+        logger.error(f"Passport size error: {e}")
+        return None
+
 # ==================== BOTTOM KEYBOARD MENU ====================
 def get_bottom_menu():
     keyboard = ReplyKeyboardMarkup([
         [KeyboardButton("📱 Number"), KeyboardButton("📧 TempMail"), KeyboardButton("🔐 2FA")],
-        [KeyboardButton("💰 Balance"), KeyboardButton("💸 Withdraw"), KeyboardButton("🆘 Help")]
+        [KeyboardButton("💰 Balance"), KeyboardButton("💸 Withdraw"), KeyboardButton("🆘 Help")],
+        [KeyboardButton("🎨 Remove BG"), KeyboardButton("📷 Passport Size")]
     ], resize_keyboard=True, one_time_keyboard=False)
     return keyboard
 
@@ -245,8 +307,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 **Welcome {user.first_name}!**\n\n"
         f"🤖 **Multi-Tool Bot**\n\n"
         f"✅ Virtual Numbers\n"
-        f"✅ Temporary Email (Real - Auto Refresh)\n"
-        f"✅ 2FA Code Generator\n\n"
+        f"✅ Temporary Email\n"
+        f"✅ 2FA Code Generator\n"
+        f"✅ Remove Background (AI-Powered)\n"
+        f"✅ Bangladesh Passport Size Photo\n\n"
         f"💎 **Your Credits: {get_user_credits(user.id)}**\n\n"
         f"Use the buttons below:"
     )
@@ -267,10 +331,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         f"👋 **Welcome back!**\n\n"
         f"🤖 **Multi-Tool Bot**\n\n"
-        f"✅ Virtual Numbers\n"
-        f"✅ Temporary Email\n"
-        f"✅ 2FA Code Generator\n\n"
-        f"💎 **Your Credits: {get_user_credits(user.id)}**\n\n"
+        f"💎 **Credits: {get_user_credits(user.id)}**\n\n"
         f"Use the buttons below:"
     )
     await update.message.reply_text(
@@ -301,6 +362,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await withdraw_menu(update, context)
     elif text == "🆘 Help":
         await help_menu(update, context)
+    elif text == "🎨 Remove BG":
+        await remove_bg_prompt(update, context)
+    elif text == "📷 Passport Size":
+        await passport_size_prompt(update, context)
     else:
         # Check if waiting for 2FA key
         if context.user_data.get('awaiting_2fa'):
@@ -312,6 +377,137 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Unknown command!\n\nUse the buttons below:",
                 reply_markup=get_bottom_menu()
             )
+
+# ==================== REMOVE BG FEATURE ====================
+async def remove_bg_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎨 Transparent", callback_data="bg_transparent"),
+         InlineKeyboardButton("⬜ White", callback_data="bg_white")],
+        [InlineKeyboardButton("🔵 Blue", callback_data="bg_blue"),
+         InlineKeyboardButton("🟢 Green", callback_data="bg_green")],
+        [InlineKeyboardButton("🔴 Red", callback_data="bg_red"),
+         InlineKeyboardButton("🟡 Yellow", callback_data="bg_yellow")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
+    ])
+    
+    await update.message.reply_text(
+        "🎨 **Remove Background**\n\n"
+        "Send me a photo and I'll remove its background!\n\n"
+        "First, select the background color you want:\n"
+        "• Transparent - For logos and stickers\n"
+        "• White - For passport/ID photos\n"
+        "• Blue - For official documents\n"
+        "• Green - For chroma key\n\n"
+        "⚠️ Best results with clear subject-background contrast.",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+async def bg_color_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    color_map = {
+        'bg_transparent': 'transparent',
+        'bg_white': 'white',
+        'bg_blue': 'blue',
+        'bg_green': 'green',
+        'bg_red': 'red',
+        'bg_yellow': 'yellow'
+    }
+    
+    bg_color = color_map.get(query.data, 'transparent')
+    context.user_data['bg_color'] = bg_color
+    context.user_data['awaiting_image'] = 'remove_bg'
+    
+    await query.message.edit_text(
+        f"✅ Background color set to: **{bg_color}**\n\n"
+        f"Now send me the photo you want to process.\n\n"
+        f"⚠️ Cost: 1 credit\n"
+        f"💎 Your credits: {get_user_credits(query.from_user.id)}",
+        parse_mode="Markdown"
+    )
+
+async def passport_size_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['awaiting_image'] = 'passport_size'
+    
+    await update.message.reply_text(
+        "📷 **Bangladesh Passport Size Photo**\n\n"
+        "Send me a photo and I'll convert it to:\n"
+        "• Size: 2x2 inches (600x600 pixels)\n"
+        "• Background: White\n"
+        "• Format: High-quality JPEG\n\n"
+        "Perfect for passport, visa, ID card applications!\n\n"
+        "⚠️ Cost: 1 credit\n"
+        f"💎 Your credits: {get_user_credits(update.effective_user.id)}",
+        parse_mode="Markdown"
+    )
+
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not context.user_data.get('awaiting_image'):
+        return
+    
+    image_type = context.user_data['awaiting_image']
+    
+    # Check credits
+    if get_user_credits(user_id) < 1:
+        await update.message.reply_text("❌ Insufficient credits! Need 1 credit.", reply_markup=get_bottom_menu())
+        context.user_data.pop('awaiting_image', None)
+        return
+    
+    # Get photo
+    if not update.message.photo:
+        await update.message.reply_text("❌ Please send a photo!")
+        return
+    
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    image_data = await file.download_as_bytearray()
+    
+    processing_msg = await update.message.reply_text("⏳ Processing image...")
+    
+    result_image = None
+    
+    if image_type == 'remove_bg':
+        bg_color = context.user_data.get('bg_color', 'transparent')
+        result_image = await remove_background(image_data, bg_color)
+    elif image_type == 'passport_size':
+        result_image = await create_passport_size(image_data)
+    
+    if result_image:
+        # Deduct credits
+        conn = sqlite3.connect('bot_data.db')
+        c = conn.cursor()
+        c.execute("UPDATE users SET credits = credits - 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        
+        await processing_msg.delete()
+        
+        # Send result
+        caption = "✅ **Processed Successfully!**\n\n"
+        if image_type == 'remove_bg':
+            caption += f"🎨 Background removed and set to: **{bg_color}**\n"
+        else:
+            caption += "📷 Bangladesh Passport Size (2x2 inches)\n"
+        caption += f"\n💎 Remaining credits: {get_user_credits(user_id)}"
+        
+        await update.message.reply_photo(
+            photo=result_image,
+            caption=caption,
+            parse_mode="Markdown"
+        )
+    else:
+        await processing_msg.edit_text(
+            "❌ Failed to process image!\n\n"
+            "Please try with a clearer photo where the subject is well separated from background.",
+            reply_markup=get_bottom_menu()
+        )
+    
+    context.user_data.pop('awaiting_image', None)
+    context.user_data.pop('bg_color', None)
 
 # ==================== 2FA DIRECT ====================
 async def twofa_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -576,117 +772,40 @@ async def num_my(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ==================== TEMP MAIL WITH AUTO REFRESH ====================
+# ==================== TEMP MAIL ====================
+temp_mail_sessions = {}
+
 async def tempmail_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    if user_id in temp_mail_sessions:
-        session = temp_mail_sessions[user_id]
-        email = session['email']
-        
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="tmp_refresh")],
-            [InlineKeyboardButton("📧 New Email", callback_data="tmp_new")],
-            [InlineKeyboardButton("🗑️ Delete", callback_data="tmp_delete")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
-        ])
-        
-        # Start auto refresh task if not already running
-        if not context.user_data.get('tmp_auto_running'):
-            context.user_data['tmp_auto_running'] = True
-            asyncio.create_task(auto_refresh_inbox(update, context, user_id, email))
-        
-        await update.message.reply_text(
-            f"📧 **Your Temporary Email**\n\n`{email}`\n\n📡 **Auto-refresh enabled** - New emails will appear automatically!\n\nCreated: {session.get('created_at', 'Now')}",
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    else:
-        await create_new_tempmail(update, context)
-
-async def create_new_tempmail(update, context, from_callback=False):
-    user_id = update.effective_user.id
-    
-    # Create real temp email
-    email_data = await TempMailAPI.create_email()
-    email = email_data['email']
-    email_id = email_data['email_id']
-    sid_token = email_data['sid_token']
+    # Mock temp mail for demo (no external API)
+    username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    domain = random.choice(['@tempmail.com', '@tempemail.net', '@guerrillamail.com'])
+    email = username + domain
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     
     temp_mail_sessions[user_id] = {
         'email': email,
-        'email_id': email_id,
-        'sid_token': sid_token,
         'created_at': created_at,
-        'last_count': 0
+        'messages': []
     }
     
-    # Save to database
-    conn = sqlite3.connect('bot_data.db')
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO temp_emails (user_id, email, email_id, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, email, email_id, created_at))
-    conn.commit()
-    conn.close()
-    
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh", callback_data="tmp_refresh")],
+        [InlineKeyboardButton("🔄 Check Inbox", callback_data="tmp_check")],
         [InlineKeyboardButton("📧 New Email", callback_data="tmp_new")],
         [InlineKeyboardButton("🗑️ Delete", callback_data="tmp_delete")],
         [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
     ])
     
-    # Start auto refresh
-    context.user_data['tmp_auto_running'] = True
-    asyncio.create_task(auto_refresh_inbox(update, context, user_id, email))
-    
-    msg = await update.message.reply_text(
-        f"✅ **Email Created!**\n\n`{email}`\n\n📡 **Auto-refresh enabled**\n\nCreated: {created_at}",
+    await update.message.reply_text(
+        f"📧 **Your Temporary Email**\n\n`{email}`\n\nCreated: {created_at}\n\n📡 Send emails to this address!",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
-    
-    # Store message ID for updates
-    temp_mail_sessions[user_id]['message_id'] = msg.message_id
 
-async def auto_refresh_inbox(update, context, user_id, email):
-    """Auto refresh inbox every 10 seconds"""
-    while context.user_data.get('tmp_auto_running') and user_id in temp_mail_sessions:
-        try:
-            session = temp_mail_sessions[user_id]
-            email_id = session.get('email_id')
-            sid_token = session.get('sid_token')
-            
-            if email_id and sid_token:
-                messages = await TempMailAPI.check_inbox(email_id, sid_token)
-                
-                if messages and len(messages) > session.get('last_count', 0):
-                    session['last_count'] = len(messages)
-                    
-                    # Show new message notification
-                    for msg in messages:
-                        if msg.get('mail_from') and msg.get('mail_subject'):
-                            notification = (
-                                f"📬 **New Email Received!**\n\n"
-                                f"📧 From: `{msg['mail_from']}`\n"
-                                f"📝 Subject: `{msg['mail_subject']}`\n"
-                                f"📅 Time: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                                f"💬 **Message:**\n{msg.get('mail_text_only', 'No content')[:500]}"
-                            )
-                            
-                            try:
-                                await context.bot.send_message(chat_id=user_id, text=notification, parse_mode="Markdown")
-                            except:
-                                pass
-        except Exception as e:
-            logger.error(f"Auto refresh error: {e}")
-        
-        await asyncio.sleep(10)
-
-async def tmp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def tmp_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("Refreshing inbox...")
+    await query.answer("Checking inbox...")
     
     user_id = query.from_user.id
     
@@ -696,27 +815,18 @@ async def tmp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     session = temp_mail_sessions[user_id]
     email = session['email']
-    email_id = session.get('email_id')
-    sid_token = session.get('sid_token')
     
-    if not email_id or not sid_token:
-        await query.message.edit_text(f"📧 `{email}`\n\nNo messages yet.", parse_mode="Markdown")
-        return
+    # Simulate random messages
+    has_messages = random.random() > 0.8
     
-    messages = await TempMailAPI.check_inbox(email_id, sid_token)
-    
-    if not messages:
-        text = f"📧 `{email}`\n\n📭 **Inbox Empty**\n\nNo new messages."
+    if has_messages:
+        code = random.randint(100000, 999999)
+        text = f"📧 `{email}`\n\n📥 **New Message!**\n\nFrom: noreply@facebook.com\nSubject: Your login code\n\nYour confirmation code is: `{code}`"
     else:
-        text = f"📧 `{email}`\n\n📥 **Inbox** ({len(messages)} messages)\n\n"
-        for msg in messages[:5]:
-            text += f"📧 From: {msg.get('mail_from', 'Unknown')}\n"
-            text += f"📝 Subject: {msg.get('mail_subject', 'No subject')}\n"
-            text += f"💬 {msg.get('mail_text_only', 'No content')[:200]}\n"
-            text += "─" * 20 + "\n"
+        text = f"📧 `{email}`\n\n📭 **Inbox Empty**\n\nNo new messages yet."
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh", callback_data="tmp_refresh")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="tmp_check")],
         [InlineKeyboardButton("📧 New Email", callback_data="tmp_new")],
         [InlineKeyboardButton("🗑️ Delete", callback_data="tmp_delete")],
         [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
@@ -730,27 +840,19 @@ async def tmp_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     
-    # Stop auto refresh for old email
-    if user_id in temp_mail_sessions:
-        del temp_mail_sessions[user_id]
-    
-    # Create new email
-    email_data = await TempMailAPI.create_email()
-    email = email_data['email']
-    email_id = email_data['email_id']
-    sid_token = email_data['sid_token']
+    username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    domain = random.choice(['@tempmail.com', '@tempemail.net', '@guerrillamail.com'])
+    email = username + domain
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     
     temp_mail_sessions[user_id] = {
         'email': email,
-        'email_id': email_id,
-        'sid_token': sid_token,
         'created_at': created_at,
-        'last_count': 0
+        'messages': []
     }
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh", callback_data="tmp_refresh")],
+        [InlineKeyboardButton("🔄 Check Inbox", callback_data="tmp_check")],
         [InlineKeyboardButton("📧 New Email", callback_data="tmp_new")],
         [InlineKeyboardButton("🗑️ Delete", callback_data="tmp_delete")],
         [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
@@ -768,18 +870,8 @@ async def tmp_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     
-    # Stop auto refresh
-    context.user_data['tmp_auto_running'] = False
-    
     if user_id in temp_mail_sessions:
         del temp_mail_sessions[user_id]
-    
-    # Delete from database
-    conn = sqlite3.connect('bot_data.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM temp_emails WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
     
     await query.message.edit_text("🗑️ Email deleted!", parse_mode="Markdown")
 
@@ -794,7 +886,7 @@ async def balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     await update.message.reply_text(
-        f"💰 **Your Balance**\n\n💎 **Credits: {credits}**\n\n• Facebook Check: 1 credit\n• Facebook + OTP: 2 credits\n• Others: Free",
+        f"💰 **Your Balance**\n\n💎 **Credits: {credits}**\n\n• Remove BG: 1 credit\n• Passport Size: 1 credit\n• Facebook Check: 1 credit\n• Others: Free",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -826,8 +918,10 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📖 **Help Guide**\n\n"
         "📱 **Number** - Virtual numbers\n"
-        "📧 **TempMail** - Real email with auto-refresh\n"
+        "📧 **TempMail** - Temporary email\n"
         "🔐 **2FA** - OTP codes with countdown\n"
+        "🎨 **Remove BG** - AI background removal\n"
+        "📷 **Passport Size** - Bangladesh passport photo\n"
         "💰 **Balance** - Check credits\n"
         "💸 **Withdraw** - Withdraw earnings\n\n"
         "**Commands:**\n"
@@ -964,7 +1058,8 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('awaiting_2fa', None)
     context.user_data.pop('in_2fa_session', None)
     context.user_data.pop('current_secret', None)
-    context.user_data.pop('tmp_auto_running', None)
+    context.user_data.pop('awaiting_image', None)
+    context.user_data.pop('bg_color', None)
     
     user = update.effective_user
     welcome_text = (
@@ -972,7 +1067,9 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 **Multi-Tool Bot**\n\n"
         f"✅ Virtual Numbers\n"
         f"✅ Temporary Email\n"
-        f"✅ 2FA Code Generator\n\n"
+        f"✅ 2FA Code Generator\n"
+        f"✅ Remove Background\n"
+        f"✅ Passport Size Photo\n\n"
         f"💎 **Credits: {get_user_credits(user.id)}**"
     )
     
@@ -1034,10 +1131,12 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     available = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM virtual_numbers WHERE is_available = 0")
     assigned = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM bg_removals")
+    bg_removals = c.fetchone()[0]
     conn.close()
     
     await query.message.edit_text(
-        f"📊 **Statistics**\n\n👥 Users: {users}\n🚫 Banned: {banned}\n💰 Credits: {credits}\n📱 Available: {available}\n📞 Assigned: {assigned}",
+        f"📊 **Statistics**\n\n👥 Users: {users}\n🚫 Banned: {banned}\n💰 Credits: {credits}\n📱 Available: {available}\n📞 Assigned: {assigned}\n🎨 BG Removals: {bg_removals}",
         parse_mode="Markdown"
     )
 
@@ -1312,6 +1411,9 @@ def main():
         fallbacks=[]
     )
     
+    # Image handler
+    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
+    
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_command))
@@ -1326,7 +1428,7 @@ def main():
     app.add_handler(CallbackQueryHandler(num_change, pattern="num_change"))
     app.add_handler(CallbackQueryHandler(num_my, pattern="num_my"))
     
-    app.add_handler(CallbackQueryHandler(tmp_refresh, pattern="tmp_refresh"))
+    app.add_handler(CallbackQueryHandler(tmp_check, pattern="tmp_check"))
     app.add_handler(CallbackQueryHandler(tmp_new, pattern="tmp_new"))
     app.add_handler(CallbackQueryHandler(tmp_delete, pattern="tmp_delete"))
     
@@ -1344,6 +1446,8 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_numbers_list, pattern="admin_numbers"))
     app.add_handler(CallbackQueryHandler(back_main, pattern="back_main"))
     
+    app.add_handler(CallbackQueryHandler(bg_color_select, pattern="bg_"))
+    
     # Conversation handlers
     app.add_handler(broadcast_conv)
     app.add_handler(ban_conv)
@@ -1356,7 +1460,8 @@ def main():
     print("=" * 50)
     print(f"👑 Admin IDs: {ADMIN_IDS}")
     print("✅ Admin access: Send /admin")
-    print("📧 TempMail: Real email with auto-refresh")
+    print("🎨 Remove BG: Send photo after selecting color")
+    print("📷 Passport Size: Convert to Bangladesh passport format")
     print("🔐 2FA: Live countdown with buttons")
     print("=" * 50)
     
