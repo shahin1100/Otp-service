@@ -36,9 +36,6 @@ def init_db():
                  (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, 
                   join_date TEXT, is_banned INTEGER DEFAULT 0, credits INTEGER DEFAULT 10)''')
     
-    c.execute('''CREATE TABLE IF NOT EXISTS totp_keys
-                 (user_id INTEGER PRIMARY KEY, secret_key TEXT, created_at TEXT)''')
-    
     c.execute('''CREATE TABLE IF NOT EXISTS temp_emails
                  (user_id INTEGER PRIMARY KEY, email TEXT, created_at TEXT)''')
     
@@ -94,9 +91,63 @@ def update_credits(user_id, amount):
     except:
         pass
 
-# ==================== BOTTOM KEYBOARD MENU (ALWAYS VISIBLE) ====================
+def is_user_banned(user_id):
+    try:
+        conn = sqlite3.connect('bot_data.db')
+        c = conn.cursor()
+        c.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
+        result = c.fetchone()
+        conn.close()
+        return result[0] == 1 if result else False
+    except:
+        return False
+
+def ban_user(user_id):
+    try:
+        conn = sqlite3.connect('bot_data.db')
+        c = conn.cursor()
+        c.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
+
+def unban_user(user_id):
+    try:
+        conn = sqlite3.connect('bot_data.db')
+        c = conn.cursor()
+        c.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
+
+def get_all_users():
+    try:
+        conn = sqlite3.connect('bot_data.db')
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users WHERE is_banned = 0")
+        users = c.fetchall()
+        conn.close()
+        return [u[0] for u in users]
+    except:
+        return []
+
+def get_banned_users():
+    try:
+        conn = sqlite3.connect('bot_data.db')
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, first_name FROM users WHERE is_banned = 1")
+        users = c.fetchall()
+        conn.close()
+        return users
+    except:
+        return []
+
+# ==================== BOTTOM KEYBOARD MENU ====================
 def get_bottom_menu():
-    """Returns a persistent bottom keyboard menu"""
     keyboard = ReplyKeyboardMarkup([
         [KeyboardButton("📱 Number"), KeyboardButton("📧 TempMail"), KeyboardButton("🔐 2FA")],
         [KeyboardButton("💰 Balance"), KeyboardButton("💸 Withdraw"), KeyboardButton("🆘 Help")]
@@ -106,13 +157,18 @@ def get_bottom_menu():
 # ==================== START COMMAND ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    if is_user_banned(user.id):
+        await update.message.reply_text("❌ You are banned from using this bot!")
+        return
+    
     add_user(user.id, user.username, user.first_name)
     
-    # Set commands
     commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("menu", "Show main menu"),
         BotCommand("myid", "Get user ID"),
+        BotCommand("admin", "Admin panel"),
     ]
     await context.bot.set_my_commands(commands)
     
@@ -121,10 +177,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 **Multi-Tool Bot**\n\n"
         f"✅ Virtual Numbers\n"
         f"✅ Temporary Email\n"
-        f"✅ 2FA Code Generator\n"
+        f"✅ 2FA Code Generator (Direct - No saving)\n"
         f"✅ Facebook Account Checker\n\n"
         f"💎 **Your Credits: {get_user_credits(user.id)}**\n\n"
-        f"Use the buttons below to get started:"
+        f"Use the buttons below:"
     )
     
     await update.message.reply_text(
@@ -135,13 +191,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    if is_user_banned(user.id):
+        await update.message.reply_text("❌ You are banned from using this bot!")
+        return
+    
     welcome_text = (
         f"👋 **Welcome back!**\n\n"
         f"🤖 **Multi-Tool Bot**\n\n"
         f"✅ Virtual Numbers\n"
         f"✅ Temporary Email\n"
-        f"✅ 2FA Code Generator\n"
-        f"✅ Facebook Account Checker\n\n"
+        f"✅ 2FA Code Generator\n\n"
         f"💎 **Your Credits: {get_user_credits(user.id)}**\n\n"
         f"Use the buttons below:"
     )
@@ -151,17 +211,22 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_bottom_menu()
     )
 
-# ==================== TEXT MESSAGE HANDLER (FOR BOTTOM BUTTONS) ====================
+# ==================== TEXT MESSAGE HANDLER ====================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
     user_id = update.effective_user.id
+    
+    if is_user_banned(user_id):
+        await update.message.reply_text("❌ You are banned from using this bot!")
+        return
+    
+    text = update.message.text
     
     if text == "📱 Number":
         await number_menu(update, context)
     elif text == "📧 TempMail":
         await tempmail_menu(update, context)
     elif text == "🔐 2FA":
-        await twofa_menu(update, context)
+        await twofa_prompt(update, context)
     elif text == "💰 Balance":
         await balance_menu(update, context)
     elif text == "💸 Withdraw":
@@ -170,17 +235,112 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_menu(update, context)
     else:
         # Check if waiting for 2FA key
-        if context.user_data.get('awaiting_2fa_key'):
-            await handle_2fa_key(update, context)
+        if context.user_data.get('awaiting_2fa'):
+            await generate_2fa_direct(update, context)
         elif context.user_data.get('awaiting_number_input'):
             await handle_number_input(update, context)
-        elif context.user_data.get('awaiting_tempmail'):
-            pass
+        elif context.user_data.get('awaiting_fb_check'):
+            await fb_check_handle(update, context)
         else:
             await update.message.reply_text(
                 "❌ Unknown command!\n\nUse the buttons below:",
                 reply_markup=get_bottom_menu()
             )
+
+# ==================== 2FA DIRECT (NO SAVING) ====================
+async def twofa_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔐 **2FA Code Generator**\n\n"
+        "Send me your TOTP secret key and I'll generate live OTP codes!\n\n"
+        "**Example:** `JBSWY3DPEHPK3PXP`\n\n"
+        "⚠️ Your key is NOT saved. You need to send it each time.",
+        parse_mode="Markdown"
+    )
+    context.user_data['awaiting_2fa'] = True
+
+async def generate_2fa_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_2fa'):
+        return
+    
+    secret = update.message.text.strip().upper().replace(" ", "")
+    
+    try:
+        totp = pyotp.TOTP(secret)
+        test = totp.now()
+        if not test or len(test) != 6:
+            raise ValueError("Invalid")
+        
+        # Send initial message
+        msg = await update.message.reply_text("⏳ Generating OTP...")
+        
+        # Live countdown loop (30 seconds)
+        for _ in range(30):
+            current_time = int(time.time())
+            remaining = totp.interval - (current_time % totp.interval)
+            otp = totp.at(current_time)
+            
+            # Progress bar
+            bar_length = 20
+            filled = int(bar_length * (30 - remaining) / 30)
+            bar = "█" * filled + "░" * (bar_length - filled)
+            
+            text = (
+                f"🔐 **Your OTP Code**\n\n"
+                f"`{otp}`\n\n"
+                f"⏳ **Expires in:** `{remaining}` seconds\n"
+                f"`{bar}`\n\n"
+                f"🔄 New code will generate automatically..."
+            )
+            
+            try:
+                await msg.edit_text(text, parse_mode="Markdown")
+            except:
+                pass
+            
+            if remaining <= 1:
+                break
+            
+            await asyncio.sleep(0.5)
+        
+        # OTP expired
+        try:
+            await msg.delete()
+        except:
+            pass
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Generate New OTP", callback_data="2fa_new")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_main")]
+        ])
+        
+        await update.message.reply_text(
+            "⌛ **OTP Expired!**\n\nClick below to generate a new code with the SAME key, or send a NEW key.",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        
+        # Keep waiting for new key
+        context.user_data['awaiting_2fa'] = True
+        
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ **Invalid Key!**\n\nError: {str(e)}\n\nPlease send a valid base32 encoded secret key.\nExample: `JBSWY3DPEHPK3PXP`",
+            parse_mode="Markdown"
+        )
+        # Still waiting for valid key
+        context.user_data['awaiting_2fa'] = True
+
+async def twofa_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.edit_text(
+        "🔐 **2FA Code Generator**\n\n"
+        "Send me your TOTP secret key again:\n\n"
+        "**Example:** `JBSWY3DPEHPK3PXP`",
+        parse_mode="Markdown"
+    )
+    context.user_data['awaiting_2fa'] = True
 
 # ==================== NUMBER MENU ====================
 async def number_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -425,175 +585,6 @@ async def tmp_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.message.edit_text("🗑️ Email deleted!", parse_mode="Markdown")
 
-# ==================== 2FA WITH LIVE COUNTDOWN ====================
-async def twofa_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    conn = sqlite3.connect('bot_data.db')
-    c = conn.cursor()
-    c.execute("SELECT secret_key FROM totp_keys WHERE user_id = ?", (user_id,))
-    has_key = c.fetchone()
-    conn.close()
-    
-    if has_key:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 Generate OTP", callback_data="2fa_gen")],
-            [InlineKeyboardButton("🗑️ Remove Key", callback_data="2fa_remove")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
-        ])
-        await update.message.reply_text(
-            "🔐 **2FA Generator**\n\n✅ Your 2FA key is saved!\n\nClick 'Generate OTP' to get your code.",
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    else:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔑 Add 2FA Key", callback_data="2fa_add")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
-        ])
-        await update.message.reply_text(
-            "🔐 **2FA Generator**\n\n❌ No 2FA key saved!\n\nClick 'Add 2FA Key' and send your secret key.",
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-
-async def add_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    await query.message.edit_text(
-        "🔑 **Add 2FA Key**\n\nPlease send your TOTP secret key.\n\nExample: `JBSWY3DPEHPK3PXP`\n\nYou can get this key from Google Authenticator or any 2FA app.",
-        parse_mode="Markdown"
-    )
-    
-    context.user_data['awaiting_2fa_key'] = True
-
-async def handle_2fa_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_2fa_key'):
-        return
-    
-    secret = update.message.text.strip().upper().replace(" ", "")
-    
-    try:
-        totp = pyotp.TOTP(secret)
-        test = totp.now()
-        if not test or len(test) != 6:
-            raise ValueError("Invalid")
-        
-        user_id = update.effective_user.id
-        
-        conn = sqlite3.connect('bot_data.db')
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO totp_keys VALUES (?, ?, ?)",
-                  (user_id, secret, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        conn.commit()
-        conn.close()
-        
-        await update.message.reply_text(
-            "✅ **2FA Key Added Successfully!**\n\nClick '2FA' button and then 'Generate OTP' to get your codes.",
-            parse_mode="Markdown",
-            reply_markup=get_bottom_menu()
-        )
-        
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ **Invalid Key!**\n\nError: {str(e)}\n\nPlease send a valid base32 encoded secret key.",
-            parse_mode="Markdown"
-        )
-    
-    context.user_data.pop('awaiting_2fa_key', None)
-
-async def generate_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    conn = sqlite3.connect('bot_data.db')
-    c = conn.cursor()
-    c.execute("SELECT secret_key FROM totp_keys WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    
-    if not result:
-        await query.message.edit_text("❌ No 2FA key found!\n\nPlease add a key first.", parse_mode="Markdown")
-        return
-    
-    secret = result[0]
-    totp = pyotp.TOTP(secret)
-    
-    # Create a new message for OTP display
-    msg = await query.message.edit_text("⏳ Generating OTP...")
-    
-    # Live countdown loop (30 seconds)
-    for _ in range(30):
-        current_time = int(time.time())
-        remaining = totp.interval - (current_time % totp.interval)
-        otp = totp.at(current_time)
-        
-        # Progress bar
-        bar_length = 20
-        filled = int(bar_length * (30 - remaining) / 30)
-        bar = "█" * filled + "░" * (bar_length - filled)
-        
-        text = (
-            f"🔐 **Your OTP Code**\n\n"
-            f"`{otp}`\n\n"
-            f"⏳ **Expires in:** `{remaining}` seconds\n"
-            f"`{bar}`\n\n"
-            f"🔄 New code will generate automatically..."
-        )
-        
-        try:
-            await msg.edit_text(text, parse_mode="Markdown")
-        except:
-            pass
-        
-        if remaining <= 1:
-            break
-        
-        await asyncio.sleep(0.5)
-    
-    # OTP expired
-    try:
-        await msg.delete()
-    except:
-        pass
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Generate New OTP", callback_data="2fa_gen")],
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_main")]
-    ])
-    
-    await query.message.reply_text(
-        "⌛ **OTP Expired!**\n\nClick below to generate a new code.",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-
-async def remove_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    conn = sqlite3.connect('bot_data.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM totp_keys WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔑 Add New Key", callback_data="2fa_add")],
-        [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
-    ])
-    
-    await query.message.edit_text(
-        "🗑️ **2FA Key Removed!**\n\nYou can add a new key anytime.",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-
 # ==================== BALANCE ====================
 async def balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -659,13 +650,14 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**Available Features:**\n\n"
         "📱 **Number** - Get virtual numbers for SMS verification\n"
         "📧 **TempMail** - Create temporary email addresses\n"
-        "🔐 **2FA** - Generate TOTP codes with live countdown\n"
+        "🔐 **2FA** - Send secret key, get live OTP with countdown (No saving)\n"
         "💰 **Balance** - Check your credits\n"
         "💸 **Withdraw** - Withdraw your earnings\n\n"
         "**Commands:**\n"
         "/start - Restart the bot\n"
         "/menu - Show main menu\n"
-        "/myid - Get your user ID\n\n"
+        "/myid - Get your user ID\n"
+        "/admin - Admin panel (Admins only)\n\n"
         "**Support:** @YourSupportUsername\n\n"
         "💡 **Tip:** You get 10 free credits when you start!"
     )
@@ -711,13 +703,13 @@ async def fb_check_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send the phone number with country code:\n\n"
         "Examples:\n"
         "• `+8801712345678` (Bangladesh)\n"
-        "• `+1234567890` (USA)\n"
-        "• `+441234567890` (UK)\n\n"
+        "• `+1234567890` (USA)\n\n"
         "⚠️ Cost: 1 credit",
         parse_mode="Markdown"
     )
     
     context.user_data['fb_check_type'] = 'check'
+    context.user_data['awaiting_fb_check'] = True
 
 async def fb_check_otp_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -733,19 +725,16 @@ async def fb_check_otp_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE
         "Examples:\n"
         "• `+8801712345678` (Bangladesh)\n"
         "• `+1234567890` (USA)\n\n"
-        "**What will happen:**\n"
-        "1. Check if Facebook account exists\n"
-        "2. If found, trigger forgot password\n"
-        "3. Send OTP via SMS (SIMULATED)\n\n"
         "⚠️ Cost: 2 credits\n"
         "⚠️ This is a DEMO simulation",
         parse_mode="Markdown"
     )
     
     context.user_data['fb_check_type'] = 'otp'
+    context.user_data['awaiting_fb_check'] = True
 
 async def fb_check_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'fb_check_type' not in context.user_data:
+    if not context.user_data.get('awaiting_fb_check'):
         return
     
     check_type = context.user_data['fb_check_type']
@@ -772,10 +761,6 @@ async def fb_check_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if exists:
         response += "✅ **Facebook account found!**\n\n"
-        response += f"**Account Info:**\n"
-        response += f"• Name: User_{phone_clean[-4:]}\n"
-        response += f"• Created: 2015-2023\n"
-        response += f"• Last Active: Recently\n\n"
         
         if check_type == 'otp':
             otp = random.randint(100000, 999999)
@@ -796,6 +781,7 @@ async def fb_check_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_bottom_menu())
     
+    context.user_data.pop('awaiting_fb_check', None)
     context.user_data.pop('fb_check_type', None)
 
 async def fb_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -838,8 +824,7 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 **Multi-Tool Bot**\n\n"
         f"✅ Virtual Numbers\n"
         f"✅ Temporary Email\n"
-        f"✅ 2FA Code Generator\n"
-        f"✅ Facebook Account Checker\n\n"
+        f"✅ 2FA Code Generator\n\n"
         f"💎 **Your Credits: {get_user_credits(user.id)}**\n\n"
         f"Use the buttons below:"
     )
@@ -870,14 +855,18 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
+        [InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("🚫 Ban User", callback_data="admin_ban")],
+        [InlineKeyboardButton("✅ Unban User", callback_data="admin_unban")],
+        [InlineKeyboardButton("📋 Banned List", callback_data="admin_banned")],
         [InlineKeyboardButton("➕ Add Number", callback_data="admin_add_num")],
         [InlineKeyboardButton("💰 Add Credits", callback_data="admin_add_cred")],
         [InlineKeyboardButton("📋 Numbers List", callback_data="admin_numbers")],
         [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
     ])
     
-    await update.message.reply_text("🔧 **Admin Panel**", parse_mode="Markdown", reply_markup=keyboard)
+    await update.message.reply_text("🔧 **Admin Panel**\n\nSelect an option:", parse_mode="Markdown", reply_markup=keyboard)
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -889,25 +878,185 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users")
     users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
+    banned = c.fetchone()[0]
     c.execute("SELECT SUM(credits) FROM users")
     credits = c.fetchone()[0] or 0
     c.execute("SELECT COUNT(*) FROM virtual_numbers WHERE is_available = 1")
     available = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM virtual_numbers WHERE is_available = 0")
     assigned = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM totp_keys")
-    totp_users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM fb_checks")
+    fb_checks = c.fetchone()[0]
     conn.close()
     
     await query.message.edit_text(
         f"📊 **Bot Statistics**\n\n"
         f"👥 Total Users: `{users}`\n"
+        f"🚫 Banned Users: `{banned}`\n"
         f"💰 Total Credits: `{credits}`\n"
         f"📱 Available Numbers: `{available}`\n"
         f"📞 Assigned Numbers: `{assigned}`\n"
-        f"🔐 2FA Users: `{totp_users}`",
+        f"📱 Facebook Checks: `{fb_checks}`",
         parse_mode="Markdown"
     )
+
+async def admin_broadcast_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Unauthorized!")
+        return
+    
+    await query.message.edit_text(
+        "📢 **Broadcast Message**\n\n"
+        "Send the message you want to broadcast to all users.\n\n"
+        "⚠️ This will be sent to ALL users.\n"
+        "Type /cancel to cancel.",
+        parse_mode="Markdown"
+    )
+    context.user_data['admin_broadcasting'] = True
+
+async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('admin_broadcasting'):
+        return
+    
+    message_text = update.message.text
+    
+    if message_text == "/cancel":
+        await update.message.reply_text("❌ Broadcast cancelled!", reply_markup=get_bottom_menu())
+        context.user_data.pop('admin_broadcasting', None)
+        return
+    
+    users = get_all_users()
+    success = 0
+    failed = 0
+    
+    status_msg = await update.message.reply_text(f"📢 Broadcasting to {len(users)} users...")
+    
+    for user_id in users:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"📢 **Broadcast Message**\n\n{message_text}", parse_mode="Markdown")
+            success += 1
+        except:
+            failed += 1
+        await asyncio.sleep(0.05)  # Avoid flood wait
+    
+    await status_msg.edit_text(
+        f"✅ **Broadcast Complete!**\n\n"
+        f"📤 Sent: {success}\n"
+        f"❌ Failed: {failed}\n"
+        f"👥 Total: {len(users)}",
+        parse_mode="Markdown"
+    )
+    
+    context.user_data.pop('admin_broadcasting', None)
+
+async def admin_ban_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Unauthorized!")
+        return
+    
+    await query.message.edit_text(
+        "🚫 **Ban User**\n\n"
+        "Send the User ID to ban:\n\n"
+        "Example: `123456789`\n\n"
+        "Type /cancel to cancel.",
+        parse_mode="Markdown"
+    )
+    context.user_data['admin_banning'] = True
+
+async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('admin_banning'):
+        return
+    
+    user_id_text = update.message.text.strip()
+    
+    if user_id_text == "/cancel":
+        await update.message.reply_text("❌ Cancelled!", reply_markup=get_bottom_menu())
+        context.user_data.pop('admin_banning', None)
+        return
+    
+    try:
+        user_id = int(user_id_text)
+        
+        if ban_user(user_id):
+            await update.message.reply_text(f"✅ User `{user_id}` has been banned!", parse_mode="Markdown")
+            
+            # Notify the banned user
+            try:
+                await context.bot.send_message(chat_id=user_id, text="❌ You have been banned from using this bot!")
+            except:
+                pass
+        else:
+            await update.message.reply_text(f"❌ Failed to ban user `{user_id}`", parse_mode="Markdown")
+    except:
+        await update.message.reply_text("❌ Invalid User ID! Please send a valid number.")
+    
+    context.user_data.pop('admin_banning', None)
+
+async def admin_unban_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Unauthorized!")
+        return
+    
+    await query.message.edit_text(
+        "✅ **Unban User**\n\n"
+        "Send the User ID to unban:\n\n"
+        "Example: `123456789`\n\n"
+        "Type /cancel to cancel.",
+        parse_mode="Markdown"
+    )
+    context.user_data['admin_unbanning'] = True
+
+async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('admin_unbanning'):
+        return
+    
+    user_id_text = update.message.text.strip()
+    
+    if user_id_text == "/cancel":
+        await update.message.reply_text("❌ Cancelled!", reply_markup=get_bottom_menu())
+        context.user_data.pop('admin_unbanning', None)
+        return
+    
+    try:
+        user_id = int(user_id_text)
+        
+        if unban_user(user_id):
+            await update.message.reply_text(f"✅ User `{user_id}` has been unbanned!", parse_mode="Markdown")
+            
+            # Notify the unbanned user
+            try:
+                await context.bot.send_message(chat_id=user_id, text="✅ You have been unbanned! You can use the bot again.")
+            except:
+                pass
+        else:
+            await update.message.reply_text(f"❌ Failed to unban user `{user_id}`", parse_mode="Markdown")
+    except:
+        await update.message.reply_text("❌ Invalid User ID! Please send a valid number.")
+    
+    context.user_data.pop('admin_unbanning', None)
+
+async def admin_banned_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Unauthorized!")
+        return
+    
+    banned_users = get_banned_users()
+    
+    if not banned_users:
+        await query.message.edit_text("📋 No banned users found.", parse_mode="Markdown")
+        return
+    
+    text = "🚫 **Banned Users List**\n\n"
+    for user in banned_users:
+        user_id, username, first_name = user
+        text += f"🆔 `{user_id}` - {first_name} (@{username or 'No username'})\n"
+    
+    await query.message.edit_text(text, parse_mode="Markdown")
 
 async def admin_add_number_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -919,7 +1068,8 @@ async def admin_add_number_prompt(update: Update, context: ContextTypes.DEFAULT_
         "➕ **Add Virtual Number**\n\n"
         "Send the number in this format:\n"
         "`+1234567890,Country`\n\n"
-        "Example: `+8801712345678,Bangladesh`",
+        "Example: `+8801712345678,Bangladesh`\n\n"
+        "Type /cancel to cancel.",
         parse_mode="Markdown"
     )
     context.user_data['admin_adding_number'] = True
@@ -928,8 +1078,14 @@ async def admin_add_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('admin_adding_number'):
         return
     
+    data = update.message.text.strip()
+    
+    if data == "/cancel":
+        await update.message.reply_text("❌ Cancelled!", reply_markup=get_bottom_menu())
+        context.user_data.pop('admin_adding_number', None)
+        return
+    
     try:
-        data = update.message.text.strip()
         parts = data.split(',')
         number = parts[0].strip()
         country = parts[1].strip() if len(parts) > 1 else "Unknown"
@@ -961,7 +1117,8 @@ async def admin_add_credits_prompt(update: Update, context: ContextTypes.DEFAULT
         "💰 **Add Credits**\n\n"
         "Send in this format:\n"
         "`USER_ID AMOUNT`\n\n"
-        "Example: `123456789 50`",
+        "Example: `123456789 50`\n\n"
+        "Type /cancel to cancel.",
         parse_mode="Markdown"
     )
     context.user_data['admin_adding_credits'] = True
@@ -970,8 +1127,15 @@ async def admin_add_credits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('admin_adding_credits'):
         return
     
+    data = update.message.text.strip()
+    
+    if data == "/cancel":
+        await update.message.reply_text("❌ Cancelled!", reply_markup=get_bottom_menu())
+        context.user_data.pop('admin_adding_credits', None)
+        return
+    
     try:
-        parts = update.message.text.strip().split()
+        parts = data.split()
         user_id = int(parts[0])
         amount = int(parts[1])
         
@@ -994,7 +1158,7 @@ async def admin_numbers_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
-    c.execute("SELECT id, number, country, is_available FROM virtual_numbers LIMIT 20")
+    c.execute("SELECT id, number, country, is_available FROM virtual_numbers LIMIT 30")
     numbers = c.fetchall()
     conn.close()
     
@@ -1020,14 +1184,32 @@ signal.signal(signal.SIGTERM, signal_handler)
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Conversation handlers for admin inputs
-    admin_num_conv = ConversationHandler(
+    # Conversation handlers
+    broadcast_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_broadcast_prompt, pattern="admin_broadcast")],
+        states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_send)]},
+        fallbacks=[]
+    )
+    
+    ban_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_ban_prompt, pattern="admin_ban")],
+        states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_ban_user)]},
+        fallbacks=[]
+    )
+    
+    unban_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_unban_prompt, pattern="admin_unban")],
+        states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_unban_user)]},
+        fallbacks=[]
+    )
+    
+    add_num_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_add_number_prompt, pattern="admin_add_num")],
         states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_number)]},
         fallbacks=[]
     )
     
-    admin_cred_conv = ConversationHandler(
+    add_cred_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_add_credits_prompt, pattern="admin_add_cred")],
         states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_credits)]},
         fallbacks=[]
@@ -1039,7 +1221,7 @@ def main():
     app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CommandHandler("admin", admin_panel))
     
-    # Text handler for bottom menu buttons
+    # Text handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     # Callback handlers
@@ -1051,9 +1233,7 @@ def main():
     app.add_handler(CallbackQueryHandler(tmp_new, pattern="tmp_new"))
     app.add_handler(CallbackQueryHandler(tmp_delete, pattern="tmp_delete"))
     
-    app.add_handler(CallbackQueryHandler(add_2fa, pattern="2fa_add"))
-    app.add_handler(CallbackQueryHandler(generate_2fa, pattern="2fa_gen"))
-    app.add_handler(CallbackQueryHandler(remove_2fa, pattern="2fa_remove"))
+    app.add_handler(CallbackQueryHandler(twofa_new, pattern="2fa_new"))
     
     app.add_handler(CallbackQueryHandler(fb_menu, pattern="fb_menu"))
     app.add_handler(CallbackQueryHandler(fb_check_prompt, pattern="fb_check"))
@@ -1063,15 +1243,16 @@ def main():
     app.add_handler(CallbackQueryHandler(withdraw_request, pattern="withdraw_req"))
     
     app.add_handler(CallbackQueryHandler(admin_stats, pattern="admin_stats"))
+    app.add_handler(CallbackQueryHandler(admin_banned_list, pattern="admin_banned"))
     app.add_handler(CallbackQueryHandler(admin_numbers_list, pattern="admin_numbers"))
     app.add_handler(CallbackQueryHandler(back_main, pattern="back_main"))
     
-    # Add conversation handlers
-    app.add_handler(admin_num_conv)
-    app.add_handler(admin_cred_conv)
-    
-    # Facebook check handler (text input)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fb_check_handle))
+    # Conversation handlers
+    app.add_handler(broadcast_conv)
+    app.add_handler(ban_conv)
+    app.add_handler(unban_conv)
+    app.add_handler(add_num_conv)
+    app.add_handler(add_cred_conv)
     
     print("=" * 50)
     print("🤖 MULTI-TOOL BOT IS RUNNING")
@@ -1080,13 +1261,8 @@ def main():
     print("   [📱 Number] [📧 TempMail] [🔐 2FA]")
     print("   [💰 Balance] [💸 Withdraw] [🆘 Help]")
     print("=" * 50)
-    print("✅ Features:")
-    print("   • 2FA with LIVE COUNTDOWN TIMER")
-    print("   • Progress bar showing remaining time")
-    print("   • Auto-refresh OTP every 30 seconds")
-    print("   • Virtual Numbers (Admin can add)")
-    print("   • Temporary Email")
-    print("   • Facebook Checker (DEMO)")
+    print("✅ 2FA: Direct - Send key, get live OTP (No saving)")
+    print("✅ Admin Panel: Broadcast, Ban, Unban, Add Numbers, Add Credits")
     print("=" * 50)
     print(f"👑 Admin ID: {ADMIN_IDS}")
     print("=" * 50)
