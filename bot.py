@@ -60,9 +60,9 @@ def init_db():
 init_db()
 
 # Global storage
-user_totp = {}  # {user_id: {'totp': pyotp.TOTP, 'secret': str, 'message_id': int}}
-temp_emails = {}  # {user_id: {'email': str, 'created_at': str, 'messages': list}}
-virtual_numbers = {}  # {user_id: {'number': str, 'country': str}}
+user_totp = {}
+temp_emails = {}
+virtual_numbers = {}
 
 # TempMail API
 class TempMailAPI:
@@ -76,7 +76,6 @@ class TempMailAPI:
     
     @staticmethod
     def get_inbox(email):
-        # Simulate inbox messages
         messages = []
         if random.random() > 0.6:
             messages.append({
@@ -99,10 +98,10 @@ class VirtualNumberAPI:
     @staticmethod
     def get_number(country):
         numbers = {
-            'usa': ['+1 (555) 123-4567', '+1 (555) 234-5678', '+1 (555) 345-6789'],
-            'uk': ['+44 20 1234 5678', '+44 20 2345 6789', '+44 20 3456 7890'],
-            'canada': ['+1 (416) 123-4567', '+1 (416) 234-5678', '+1 (416) 345-6789'],
-            'australia': ['+61 2 1234 5678', '+61 2 2345 6789', '+61 2 3456 7890']
+            'usa': ['+1 (555) 123-4567', '+1 (555) 234-5678', '+1 (555) 345-6789', '+1 (555) 456-7890', '+1 (555) 567-8901'],
+            'uk': ['+44 20 1234 5678', '+44 20 2345 6789', '+44 20 3456 7890', '+44 20 4567 8901', '+44 20 5678 9012'],
+            'canada': ['+1 (416) 123-4567', '+1 (416) 234-5678', '+1 (416) 345-6789', '+1 (416) 456-7890', '+1 (416) 567-8901'],
+            'australia': ['+61 2 1234 5678', '+61 2 2345 6789', '+61 2 3456 7890', '+61 2 4567 8901', '+61 2 5678 9012']
         }
         return random.choice(numbers.get(country, numbers['usa']))
 
@@ -264,7 +263,7 @@ async def get_virtual_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await query.message.edit_text(
         f"📱 **Your Virtual Number**\n\n"
-        f"🇺🇸 **Country:** {country_names[country]}\n"
+        f"🌍 **Country:** {country_names[country]}\n"
         f"📞 **Number:** `{number}`\n\n"
         f"⚠️ This number can receive SMS for verifications.\n"
         f"📝 Valid for 10 minutes.",
@@ -686,7 +685,7 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
-# Facebook Checker (reusing your existing code)
+# Facebook Checker Functions
 async def facebook_checker_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -712,10 +711,197 @@ async def facebook_checker_menu(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=keyboard
     )
 
+async def fb_check_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    credits = get_user_credits(user_id)
+    
+    if credits < 1:
+        await query.message.edit_text(
+            "❌ **Insufficient Credits!**\n\n"
+            f"You have {credits} credits.\n"
+            "Each check costs 1 credit.\n\n"
+            "Contact admin to get more credits.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    await query.message.edit_text(
+        "📱 **Check Single Number**\n\n"
+        "Send me the phone number to check:\n\n"
+        "**Format:**\n"
+        "• `+1234567890` (with country code)\n"
+        "• `1234567890` (US/CA)\n\n"
+        "**Example:** `+8801712345678`\n\n"
+        "⚠️ Cost: 1 credit"
+    )
+    
+    context.user_data['awaiting_fb_check'] = 'single'
+    return 1
+
+async def fb_check_with_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    credits = get_user_credits(user_id)
+    
+    if credits < 2:
+        await query.message.edit_text(
+            "❌ **Insufficient Credits!**\n\n"
+            f"You have {credits} credits.\n"
+            "Check + OTP costs 2 credits.\n\n"
+            "Contact admin to get more credits.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    await query.message.edit_text(
+        "📱 **Check + Send OTP**\n\n"
+        "Send me the phone number:\n\n"
+        "**What will happen:**\n"
+        "1. Check if Facebook account exists\n"
+        "2. If found, trigger forgot password\n"
+        "3. Send OTP via SMS (SIMULATED)\n\n"
+        "⚠️ Cost: 2 credits\n"
+        "⚠️ This is a DEMO simulation"
+    )
+    
+    context.user_data['awaiting_fb_check'] = 'with_otp'
+    return 1
+
+async def handle_fb_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'awaiting_fb_check' not in context.user_data:
+        return
+    
+    check_type = context.user_data['awaiting_fb_check']
+    phone = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    cost = 2 if check_type == 'with_otp' else 1
+    
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET credits = credits - ? WHERE user_id = ?", (cost, user_id))
+    conn.commit()
+    conn.close()
+    
+    status_msg = await update.message.reply_text("🔍 Processing...")
+    
+    result = FacebookChecker.check_account(phone)
+    
+    response = f"📱 **Phone:** `{phone}`\n\n"
+    response += f"{result['message']}\n\n"
+    
+    if result['account_found']:
+        response += "**Account Details:**\n"
+        response += f"• Name: {result.get('account_info', {}).get('name', 'Unknown')}\n"
+        response += f"• Created: {result.get('account_info', {}).get('created', 'Unknown')}\n\n"
+        
+        if check_type == 'with_otp' and result['can_recover']:
+            await status_msg.edit_text("📨 Sending recovery OTP...")
+            await asyncio.sleep(2)
+            
+            otp_result = FacebookChecker.send_recovery_otp(phone)
+            
+            response += "**Recovery OTP:**\n"
+            response += f"{otp_result['message']}\n"
+            if otp_result['success']:
+                response += f"📱 **SIMULATED OTP:** `{otp_result['otp']}`\n"
+                response += f"⏱️ Expires in: {otp_result['expires_in']} seconds\n"
+                response += "\n⚠️ **This is a SIMULATION**"
+            
+            otp_sent = otp_result['success']
+        else:
+            otp_sent = False
+            if check_type == 'with_otp':
+                response += "⚠️ Recovery not available for this account.\n"
+    else:
+        otp_sent = False
+    
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO fb_checks (user_id, phone_number, status, account_found, otp_sent, checked_at) VALUES (?, ?, ?, ?, ?, ?)",
+              (user_id, phone, result['status'], 
+               1 if result['account_found'] else 0,
+               1 if otp_sent else 0,
+               datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Check Another", callback_data="fb_check_single")],
+        [InlineKeyboardButton("📊 Check History", callback_data="fb_history")],
+        [InlineKeyboardButton("🔙 Back", callback_data="get_number")]
+    ])
+    
+    await status_msg.delete()
+    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=keyboard)
+    
+    context.user_data.pop('awaiting_fb_check', None)
+    return ConversationHandler.END
+
+async def fb_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute("SELECT phone_number, status, account_found, checked_at FROM fb_checks WHERE user_id = ? ORDER BY checked_at DESC LIMIT 10", (user_id,))
+    logs = c.fetchall()
+    conn.close()
+    
+    if not logs:
+        await query.message.edit_text("No check history found. Use the checker first!")
+        return
+    
+    history_text = "📊 **Your Facebook Check History**\n\n"
+    for log in logs:
+        phone, status, found, time = log
+        history_text += f"📱 `{phone[:4]}****{phone[-4:]}`\n"
+        history_text += f"✅ Found: `{'Yes' if found else 'No'}`\n"
+        history_text += f"🕐 `{time}`\n"
+        history_text += "─" * 20 + "\n"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh", callback_data="fb_history")],
+        [InlineKeyboardButton("🔙 Back", callback_data="get_number")]
+    ])
+    
+    await query.message.edit_text(history_text, parse_mode="Markdown", reply_markup=keyboard)
+
+async def fb_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    info_text = (
+        "ℹ️ **Facebook Checker - Information**\n\n"
+        "**⚠️ IMPORTANT DISCLAIMER:**\n"
+        "This is a DEMO/SIMULATION tool for educational purposes only.\n\n"
+        "**How it works:**\n"
+        "• Checks phone number against simulated database\n"
+        "• Does NOT access real Facebook accounts\n"
+        "• Does NOT send actual SMS messages\n"
+        "• All OTPs shown are randomly generated\n\n"
+        "For real Facebook account recovery, visit:\n"
+        "https://www.facebook.com/login/identify"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back", callback_data="get_number")]
+    ])
+    
+    await query.message.edit_text(info_text, parse_mode="Markdown", reply_markup=keyboard)
+
 # Admin Panel
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Unauthorized access!")
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Unauthorized!")
         return
     
     keyboard = InlineKeyboardMarkup([
@@ -728,7 +914,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Back to Menu", callback_data="main_menu")]
     ])
     
-    await update.message.reply_text(
+    await query.message.edit_text(
         "🔧 **Admin Panel**\n\nWelcome to admin control panel.\n\nSelect an option:",
         parse_mode="Markdown",
         reply_markup=keyboard
@@ -775,6 +961,39 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await query.message.edit_text(stats_text, parse_mode="Markdown")
+
+async def admin_fb_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Unauthorized!")
+        return
+    
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute("SELECT user_id, phone_number, status, account_found, otp_sent, checked_at FROM fb_checks ORDER BY checked_at DESC LIMIT 20")
+    logs = c.fetchall()
+    conn.close()
+    
+    if not logs:
+        await query.message.edit_text("No logs found.")
+        return
+    
+    logs_text = "📋 **Recent Facebook Checks**\n\n"
+    for log in logs:
+        user_id, phone, status, found, otp_sent, time = log
+        logs_text += f"👤 User: `{user_id}`\n"
+        logs_text += f"📱 Phone: `{phone[:4]}****{phone[-4:]}`\n"
+        logs_text += f"✅ Found: `{'Yes' if found else 'No'}`\n"
+        logs_text += f"📨 OTP Sent: `{'Yes' if otp_sent else 'No'}`\n"
+        logs_text += f"🕐 Time: `{time}`\n"
+        logs_text += "─" * 20 + "\n"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_fb_logs")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
+    ])
+    
+    await query.message.edit_text(logs_text, parse_mode="Markdown", reply_markup=keyboard)
 
 # Start and other commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -840,9 +1059,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**Need help?** Contact @YourSupportUsername"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
-
-# Include your existing Facebook checker functions here (fb_check_single, fb_check_with_otp, handle_fb_check, fb_history, fb_info)
-# [Previous Facebook checker functions remain the same]
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
