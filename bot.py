@@ -64,6 +64,8 @@ def init_db():
             ('+44 20 2345 6789', 'UK'),
             ('+1 (416) 123-4567', 'Canada'),
             ('+61 2 1234 5678', 'Australia'),
+            ('+880 1712 345678', 'Bangladesh'),
+            ('+880 1812 345678', 'Bangladesh'),
         ]
         for number, country in sample_numbers:
             c.execute("INSERT INTO virtual_numbers (number, country, is_available) VALUES (?, ?, ?)",
@@ -179,7 +181,7 @@ def get_available_count():
         conn.close()
         return count
     except:
-        return 6
+        return 8
 
 # ==================== BOTTOM KEYBOARD MENU ====================
 def get_bottom_menu():
@@ -1102,10 +1104,6 @@ async def admin_numbers_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.edit_text(text, parse_mode="Markdown")
 
 # ==================== MAIN ====================
-async def webhook_handler(request):
-    """Handle webhook requests"""
-    return "Bot is running"
-
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
@@ -1185,8 +1183,12 @@ def main():
     print(f"👑 Admin IDs: {ADMIN_IDS}")
     print(f"🌐 Running on port: {PORT}")
     print("=" * 50)
+    print("✅ Features: Number, TempMail, 2FA, Balance, Withdraw, Help")
+    print("✅ 2FA: Live countdown with progress bar")
+    print("✅ Admin: Broadcast, Ban, Unban, Add Numbers, Add Credits")
+    print("=" * 50)
     
-    # Use webhook for Railway (prevents crashing)
+    # Use webhook for Railway
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
